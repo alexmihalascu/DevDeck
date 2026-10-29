@@ -1,6 +1,6 @@
 // Draws the sidebar, toolbar, tabs and whichever page is active. Pages that own inputs (git, env) redraw themselves.
 import type { Project } from '../../types.ts';
-import { $, esc } from './util.ts';
+import { $, esc, morph } from './util.ts';
 import {
   state, SERVICES, termsOf, statusOf, projectOf, portOwner, serviceTerm, serviceState, visibleProjects, projectSub,
   since, uptime, statChip, statText, portLink, avatar, gitLine,
@@ -12,6 +12,15 @@ import { drawCharts } from './charts.ts';
 
 export function render() { renderSidebar(); renderMain(); }
 
+/** One-shot entrance for a page that was just drawn; the class goes away so later morphs don't replay it. */
+export function enter(el: HTMLElement) {
+  el.classList.remove('enter');
+  void el.offsetWidth;
+  el.classList.add('enter');
+  clearTimeout(Number(el.dataset.enterTimer));
+  el.dataset.enterTimer = String(setTimeout(() => el.classList.remove('enter'), 700));
+}
+
 /** 5 s stats tick: update numbers and charts in place, no full re-render. */
 export function drawStats() {
   for (const el of document.querySelectorAll<HTMLElement>('[data-stat]')) el.textContent = statText(el.dataset.stat!);
@@ -21,14 +30,14 @@ export function drawStats() {
 function renderSidebar() {
   const running = termsOf((m) => m.status === 'running');
   $('#running-count').textContent = running.length ? String(running.length) : '';
-  $('#running').innerHTML = running.map((m) => `
+  morph($('#running'), running.map((m) => `
     <button class="row" data-act="focus" data-tid="${m.id}">
       <span class="dot running"></span>
       <span class="row-main"><span class="row-title">${esc(m.title)}</span><span class="row-sub">${esc(projectOf(m.projectId)?.name)}, up ${uptime(m)} ${statChip(`t${m.id}`)}</span></span>
       ${portLink(m)}
-    </button>`).join('');
+    </button>`).join(''));
 
-  $('#services').innerHTML = state.config.services.map((svc) => {
+  morph($('#services'), state.config.services.map((svc) => {
     const st = serviceState(svc);
     const m = serviceTerm(svc);
     const owner = portOwner(svc.port);
@@ -37,11 +46,11 @@ function renderSidebar() {
       <span class="dot ${st}"></span>
       <span class="row-main"><span class="row-title">${esc(svc.name)}</span><span class="row-sub">${sub}</span></span>
     </button>`;
-  }).join('') || `<button class="row add-row${state.selected === SERVICES ? ' selected-soft' : ''}" data-act="select" data-pid="${SERVICES}"><i class="ph ph-plus"></i><span class="row-main"><span class="row-title">Add a service</span><span class="row-sub">MySQL, Apache, Redis...</span></span></button>`;
+  }).join('') || `<button class="row add-row${state.selected === SERVICES ? ' selected-soft' : ''}" data-act="select" data-pid="${SERVICES}"><i class="ph ph-plus"></i><span class="row-main"><span class="row-title">Add a service</span><span class="row-sub">MySQL, Apache, Redis...</span></span></button>`);
 
   $('[data-act=toggle-hidden]').classList.toggle('on', state.showHidden);
   const list = visibleProjects();
-  $('#projects').innerHTML = list.map((p) => {
+  morph($('#projects'), list.map((p) => {
     const metas = termsOf((m) => m.projectId === p.id);
     const n = metas.filter((m) => m.status === 'running').length;
     const st = statusOf(metas);
@@ -51,7 +60,7 @@ function renderSidebar() {
       <span class="row-main"><span class="row-title">${esc(p.name)}</span><span class="row-sub git-line">${gitLine(p) || esc(projectSub(p))}</span></span>
       ${n ? `<span class="count">${n}</span>` : ''}
     </button>`;
-  }).join('') || `<p class="side-empty">${state.config.projects.length ? 'No matching projects.' : 'No projects yet.'}</p>`;
+  }).join('') || `<p class="side-empty">${state.config.projects.length ? 'No matching projects.' : 'No projects yet.'}</p>`);
 }
 
 const viewToggle = (grid: boolean) => `<div class="seg">
@@ -94,9 +103,9 @@ function renderMain() {
   const grid = state.view === 'grid';
   const showPage = !project || isPage(activeId);
 
-  $('#toolbar').innerHTML = toolbar(project, grid);
+  morph($('#toolbar'), toolbar(project, grid));
   const tab = (page: string, icon: string, label: string, extra = '') => `<div class="tab page-tab${activeId === page ? ' active' : ''}" role="tab" tabindex="0" aria-selected="${activeId === page}" data-act="page" data-page="${page}" data-pid="${esc(project!.id)}"><i class="ph ${icon}"></i>${label}${extra}</div>`;
-  $('#tabs').innerHTML = !project ? '' : `
+  morph($('#tabs'), !project ? '' : `
     ${tab('overview', 'ph-house', 'Overview')}
     ${project.id !== SERVICES ? tab('git', 'ph-git-branch', 'Git', state.git[project.id]?.changed ? ` <span class="count-pill">${state.git[project.id].changed}</span>` : '') : ''}
     ${project.envFiles?.length ? tab('env', 'ph-key', 'Env', ` <span class="count-pill">${project.envFiles.length}</span>`) : ''}
@@ -107,21 +116,27 @@ function renderMain() {
         ${m.status === 'running' ? '<button class="icon-btn" data-act="kill" title="Stop"><i class="ph ph-stop"></i></button>' : ''}
         <button class="icon-btn" data-act="restart" title="Restart"><i class="ph ph-arrow-clockwise"></i></button>
         <button class="icon-btn" data-act="close" title="Close"><i class="ph ph-x"></i></button>
-      </div>`).join('')}`;
+      </div>`).join('')}`);
 
   const page = $('#page');
   page.classList.toggle('visible', showPage);
   page.classList.toggle('full', activeId === 'git');
   if (showPage && project && activeId === 'env') {
-    if (page.dataset.view !== `env:${project.id}`) { page.dataset.view = `env:${project.id}`; openEnv(project); }
+    if (page.dataset.view !== `env:${project.id}`) { page.dataset.view = `env:${project.id}`; enter(page); openEnv(project); }
   } else if (showPage && project && activeId === 'git') {
     // The git page owns inputs (commit message, checkboxes); it redraws only when its own data changes.
-    if (page.dataset.view !== `git:${project.id}`) { page.dataset.view = `git:${project.id}`; loadGit(project.id); }
+    if (page.dataset.view !== `git:${project.id}`) { page.dataset.view = `git:${project.id}`; enter(page); loadGit(project.id); }
   } else if (showPage) {
-    page.dataset.view = '';
-    const scroll = page.scrollTop;
-    page.innerHTML = project?.id === SERVICES ? servicesPage() : project ? overviewPage(project) : dashboardPage();
-    page.scrollTop = scroll;
+    const html = project?.id === SERVICES ? servicesPage() : project ? overviewPage(project) : dashboardPage();
+    const view = `page:${project?.id ?? ''}`;
+    if (page.dataset.view === view) morph(page, html);
+    else {
+      // A different page: draw it fresh, scrolled to the top, and let its sections rise in.
+      page.dataset.view = view;
+      page.innerHTML = html;
+      page.scrollTop = 0;
+      enter(page);
+    }
     drawCharts();
   }
 
@@ -130,7 +145,7 @@ function renderMain() {
     const m = t.meta;
     t.el.classList.toggle('visible', !showPage && m.projectId === project?.id && (grid || m.id === activeId));
     t.el.classList.toggle('active', m.id === activeId);
-    (t.el.querySelector('.pane-title') as HTMLElement).innerHTML = `<span class="dot ${statusOf([m])}"></span>${esc(m.title)} ${portLink(m)}`;
+    morph(t.el.querySelector('.pane-title')!, `<span class="dot ${statusOf([m])}"></span>${esc(m.title)} ${portLink(m)}`);
   }
   queueFit();
 }

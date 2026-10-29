@@ -6,7 +6,7 @@ import {
   state, SERVICES, termsOf, termFor, statusOf, projectOf, portOwner, serviceTerm, serviceState, visibleProjects,
   since, uptime, statChip, portLink, avatar, gitLine, emptyState, skeletonRows,
 } from '../state.ts';
-import { usageCharts, processTable, processRows } from '../charts.ts';
+import { usageCharts, processTable, processRows, meterValue } from '../charts.ts';
 import { render } from '../render.ts';
 
 // ---------- dashboard ----------
@@ -24,8 +24,8 @@ export function dashboardPage(): string {
   const list = visibleProjects();
   return `<div class="page-inner">
     <div class="stats">
-      <div class="stat"><span>CPU</span><b data-machine="cpu">...</b><i class="meter s1" data-meter="cpu"></i></div>
-      <div class="stat"><span>Memory <small data-machine="memTotal"></small></span><b data-machine="mem">...</b><i class="meter s2" data-meter="mem"></i></div>
+      <div class="stat"><span>CPU</span><b data-machine="cpu">...</b><i class="meter s1" data-meter="cpu" style="--v:${meterValue('cpu')}"></i></div>
+      <div class="stat"><span>Memory <small data-machine="memTotal"></small></span><b data-machine="mem">...</b><i class="meter s2" data-meter="mem" style="--v:${meterValue('mem')}"></i></div>
       <div class="stat"><span>Processes</span><b>${procs.length}${failed.length ? ` <em class="bad">${failed.length} crashed</em>` : ''}</b></div>
       <div class="stat"><span>PC uptime</span><b data-machine="uptime">...</b></div>
     </div>

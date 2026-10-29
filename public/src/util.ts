@@ -50,5 +50,51 @@ export function toast(text: string, error = false) {
   box.append(el);
 }
 
+/**
+ * Patch el's children to match html instead of replacing them, so focus, hover, scroll, running CSS animations and
+ * half-typed input survive the frequent re-renders (every server message). Nodes pair up by position; a different
+ * tag, or a different data-key, replaces the node.
+ */
+export function morph(el: Element, html: string) {
+  const next = document.createElement('template');
+  next.innerHTML = html;
+  patchChildren(el, next.content);
+}
+function patchChildren(from: Node, to: Node) {
+  const want = [...to.childNodes];
+  let cur = from.firstChild;
+  for (const n of want) {
+    if (!cur) { from.appendChild(n); continue; }
+    if (sameKind(cur, n)) { patchNode(cur, n); cur = cur.nextSibling; continue; }
+    from.insertBefore(n, cur);
+    const stale = cur;
+    cur = cur.nextSibling;
+    // Keep scanning from the stale node only if the next wanted node may still match it; otherwise drop it now.
+    if (!want.some((w) => sameKind(stale, w))) stale.remove(); else cur = stale;
+  }
+  while (cur) { const n = cur.nextSibling; cur.remove(); cur = n; }
+}
+function sameKind(a: Node, b: Node) {
+  if (a.nodeType !== b.nodeType || a.nodeName !== b.nodeName) return false;
+  if (a.nodeType !== 1) return true;
+  return (a as Element).getAttribute('data-key') === (b as Element).getAttribute('data-key');
+}
+function patchNode(cur: Node, n: Node) {
+  if (cur.nodeType !== 1) { if (cur.nodeValue !== n.nodeValue) cur.nodeValue = n.nodeValue; return; }
+  const a = cur as HTMLElement, b = n as HTMLElement;
+  for (const { name } of [...a.attributes]) if (!b.hasAttribute(name)) a.removeAttribute(name);
+  for (const { name, value } of [...b.attributes]) if (a.getAttribute(name) !== value) a.setAttribute(name, value);
+  if (a instanceof HTMLTextAreaElement) return; // its text is the user's
+  if (a instanceof HTMLInputElement) {
+    // Properties, not attributes, are what the user sees; leave the field being edited alone.
+    if (a.type === 'checkbox' || a.type === 'radio') a.checked = b.hasAttribute('checked');
+    else if (document.activeElement !== a) a.value = (b as HTMLInputElement).value;
+    return;
+  }
+  // A child list another module owns (it says so with data-own) is left as is.
+  if (a.hasAttribute('data-own')) return;
+  patchChildren(a, b);
+}
+
 /** Read a data-* attribute from the nearest element that has it. */
 export const dataOf = (el: Element, key: string) => (el.closest(`[data-${key}]`) as HTMLElement | null)?.dataset[key.replace(/-(\w)/g, (_, c: string) => c.toUpperCase())];

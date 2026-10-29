@@ -321,7 +321,7 @@ export function drawSettings() {
     ${me.local ? `<section><h3>Devdeck on this PC</h3><div class="list">
       <div class="list-row"><i class="ph ph-power muted"></i>
         <div class="grow"><div>Start Devdeck with Windows</div><div class="sub">Runs in the background after you log in, no window. Projects and services marked to auto-start come up with it.</div></div>
-        <button class="btn sm ${me.autostart ? 'btn-primary' : ''}" data-act="autostart-toggle">${me.autostart ? 'On' : 'Off'}</button></div>
+        <button class="switch" role="switch" aria-checked="${!!me.autostart}" aria-label="Start Devdeck with Windows" data-act="autostart-toggle"></button></div>
       <div class="list-row"><i class="ph ph-desktop muted"></i>
         <div class="grow"><div>Desktop shortcut</div><div class="sub">Starts Devdeck if it isn't running and opens it in the browser.</div></div>
         <button class="btn sm" data-act="shortcut">Create</button></div>

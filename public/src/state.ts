@@ -108,10 +108,18 @@ export const statText = (key: string) => {
 export const statChip = (key: string) => `<span class="stat-chip" data-stat="${key}">${statText(key)}</span>`;
 export const portLink = (m: { port: number | null }) => m.port
   ? `<a class="port" href="http://${location.hostname}:${m.port}" target="_blank" rel="noopener" title="Open in browser">:${m.port}</a>` : '';
-export const avatar = (p: Project, cls = '') => {
+// Icons that failed to load: remembered so the next render draws the letter instead of retrying the image.
+const noIcon = new Set<string>();
+(window as any).devdeckNoIcon = (img: HTMLImageElement, id: string) => {
+  noIcon.add(id);
+  const p = projectOf(id);
+  if (p) img.parentElement!.outerHTML = avatar(p, img.parentElement!.classList.contains('lg') ? 'lg' : '');
+};
+export const avatar = (p: Project, cls = ''): string => {
   const letter = `<span class="avatar-letter" style="--h:${hue(p.name)}">${esc(p.name[0]?.toUpperCase())}</span>`;
   return p.icon
-    ? `<span class="avatar ${cls}"><img src="/api/icon?id=${encodeURIComponent(p.id)}" alt="" loading="lazy" onerror="this.replaceWith(this.nextElementSibling.content.cloneNode(true))"><template>${letter}</template></span>`
+    && !noIcon.has(p.id)
+    ? `<span class="avatar ${cls}"><img src="/api/icon?id=${encodeURIComponent(p.id)}" alt="" loading="lazy" onerror="devdeckNoIcon(this, '${esc(p.id)}')"></span>`
     : `<span class="avatar ${cls}">${letter}</span>`;
 };
 export const gitLine = (p: Project) => {

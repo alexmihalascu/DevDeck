@@ -1,7 +1,7 @@
 // Usage charts in plain SVG. One measure per chart (never two y-axes). CPU = series-1 (blue), memory = series-2 (orange):
 // the same pair on every chart, validated for colour-blind separation on both themes.
 import type { Sample, TermMeta } from '../../types.ts';
-import { esc, fmtDur, fmtMem, fmtPct } from './util.ts';
+import { esc, fmtDur, fmtMem, fmtPct, morph } from './util.ts';
 import { state, projectOf, since, portLink, emptyState } from './state.ts';
 
 const MAX_POINTS = 720;
@@ -167,22 +167,25 @@ export function usageCharts(keys?: string[]): string {
   </div>`;
 }
 
+/** Fill of the stat strip meters, 0..1: CPU load and the share of memory in use. */
+export function meterValue(kind: 'cpu' | 'mem') {
+  const m = state.machine;
+  const v = !m ? 0 : kind === 'cpu' ? m.cpu ?? 0 : (m.memUsed / m.memTotal) * 100;
+  return (Math.min(v, 100) / 100).toFixed(3);
+}
+
 /** Called on every 'stats' message: refresh chart blocks and numbers without rebuilding the page. */
 export function drawCharts() {
   for (const el of document.querySelectorAll<HTMLElement>('[data-usage]')) {
     const keys = el.dataset.usage === 'machine' ? undefined : processRows(el.dataset.usage).map((r) => r.key);
-    el.innerHTML = usageCharts(keys);
+    morph(el, usageCharts(keys));
   }
   if (hover) for (const fig of document.querySelectorAll<HTMLElement>('.chart')) if (fig.querySelector('.chart-title')!.textContent === hover.title) showHover(fig, hover.x);
-  for (const el of document.querySelectorAll<HTMLElement>('[data-proc-table]')) el.innerHTML = processTable(processRows(el.dataset.procTable || undefined));
+  for (const el of document.querySelectorAll<HTMLElement>('[data-proc-table]')) morph(el, processTable(processRows(el.dataset.procTable || undefined)));
   const m = state.machine;
   for (const el of document.querySelectorAll<HTMLElement>('[data-machine]')) {
     const k = el.dataset.machine;
     el.textContent = !m ? '...' : k === 'cpu' ? fmtPct(m.cpu) : k === 'mem' ? fmtMem(m.memUsed) : k === 'memTotal' ? `of ${fmtMem(m.memTotal)}` : fmtDur(m.uptime * 1000);
   }
-  // Meters under the stat strip: CPU load and share of memory in use.
-  for (const el of document.querySelectorAll<HTMLElement>('[data-meter]')) {
-    const v = !m ? 0 : el.dataset.meter === 'cpu' ? m.cpu ?? 0 : (m.memUsed / m.memTotal) * 100;
-    el.style.setProperty('--v', (Math.min(v, 100) / 100).toFixed(3));
-  }
+  for (const el of document.querySelectorAll<HTMLElement>('[data-meter]')) el.style.setProperty('--v', meterValue(el.dataset.meter as 'cpu' | 'mem'));
 }
