@@ -61,9 +61,13 @@ export function lineChart(spec: LineSpec): string {
       <div class="cross" hidden></div><i class="cross-dot" hidden></i><div class="tip" hidden></div>
       ${points.length < 2 ? '<div class="plot-empty">Collecting samples, one every 5 seconds...</div>' : ''}
     </div>
-    <div class="chart-foot"><span>last ${points.length > 1 ? fmtDur(t1 - t0) : '-'}</span><span>avg ${avg == null ? '-' : esc(spec.fmt(avg))}</span><span>peak ${peak == null ? '-' : esc(spec.fmt(peak))}</span></div>
+    ${points.length > 1 ? `<div class="xaxis"><span>${before(t1 - t0)}</span><span>${before((t1 - t0) / 2)}</span><span>now</span></div>` : ''}
+    <div class="chart-foot"><span>avg ${avg == null ? '-' : esc(spec.fmt(avg))}</span><span>peak ${peak == null ? '-' : esc(spec.fmt(peak))}</span></div>
   </figure>`;
 }
+
+/** Relative time on the x axis ("-12m"): clock times repeat in short windows, distances never do. */
+const before = (ms: number) => `-${fmtDur(ms).split(' ')[0]}`;
 
 /** Crosshair + tooltip: snaps to the nearest sample, so the reader aims at a time, not at a 2px line. */
 export function chartHover(e: PointerEvent) {

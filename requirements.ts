@@ -62,7 +62,7 @@ export function checkProject(p: Project, ctx: Context): Requirement[] {
   // Dependencies installed
   for (const a of p.apps.filter((x) => x.install)) {
     out.push({
-      id: `deps:${a.id}`, label: `${a.name}: dependencies`,
+      id: `deps:${a.id}`, label: p.apps.length > 1 ? `${a.name}: dependencies` : 'Dependencies',
       status: a.install === 'ok' ? 'ok' : 'fail',
       detail: a.install === 'ok' ? 'node_modules matches package.json' : a.install === 'missing' ? 'node_modules is missing' : 'Some packages from package.json are not installed',
       fix: a.install === 'ok' ? undefined : { kind: 'install', arg: a.id, label: `${a.pm} install` },
