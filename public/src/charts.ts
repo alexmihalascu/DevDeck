@@ -2,7 +2,7 @@
 // the same pair on every chart, validated for colour-blind separation on both themes.
 import type { Sample, TermMeta } from '../../types.ts';
 import { esc, fmtDur, fmtMem, fmtPct } from './util.ts';
-import { state, projectOf, since, portLink } from './state.ts';
+import { state, projectOf, since, portLink, emptyState } from './state.ts';
 
 const MAX_POINTS = 720;
 
@@ -128,7 +128,7 @@ export function processRows(projectId?: string): ProcRow[] {
 
 /** The table view of the charts: every number readable without hovering. */
 export function processTable(rows: ProcRow[]): string {
-  if (!rows.length) return '<div class="empty-box">Nothing running right now. Start a script or a service and its usage shows up here.</div>';
+  if (!rows.length) return emptyState('ph-pulse', 'Nothing running', 'Start a script or a service and its CPU and memory show up here.', '', true);
   const longest = Math.max(...rows.map((r) => r.startedAt ? Date.now() - r.startedAt : 0), 1);
   return `<div class="list proc-table">
     <div class="proc-row head"><span>Process</span><span>Uptime</span><span>CPU</span><span>Memory</span><span></span></div>
@@ -153,7 +153,7 @@ export function usageCharts(keys?: string[]): string {
     const h = state.history.machine;
     const total = state.machine?.memTotal || h.at(-1)?.memTotal || 1;
     return `<div class="charts">
-      ${lineChart({ title: 'CPU, whole PC', series: 1, max: 100, fmt: (v) => `${Math.round(v)}%`, ticks: [0, 50, 100], points: h.map((s) => ({ at: s.at, v: s.cpu })) })}
+      ${lineChart({ title: 'CPU, whole PC', series: 1, max: 100, fmt: fmtPct, ticks: [0, 50, 100], points: h.map((s) => ({ at: s.at, v: s.cpu })) })}
       ${lineChart({ title: 'Memory, whole PC', series: 2, max: total, fmt: fmtMem, ticks: [0, total / 2, total], points: h.map((s) => ({ at: s.at, v: s.mem })) })}
     </div>`;
   }
@@ -162,7 +162,7 @@ export function usageCharts(keys?: string[]): string {
   const memMax = Math.ceil(peakMem / 268435456) * 268435456; // round up to 256 MB steps
   const cpuMax = Math.max(10, Math.ceil(Math.max(...sum.map((s) => s.cpu ?? 0), 1) / 10) * 10);
   return `<div class="charts">
-    ${lineChart({ title: 'CPU, this project', series: 1, max: cpuMax, fmt: (v) => `${v.toFixed(v < 10 ? 1 : 0)}%`, ticks: [0, cpuMax / 2, cpuMax], points: sum.map((s) => ({ at: s.at, v: s.cpu })) })}
+    ${lineChart({ title: 'CPU, this project', series: 1, max: cpuMax, fmt: fmtPct, ticks: [0, cpuMax / 2, cpuMax], points: sum.map((s) => ({ at: s.at, v: s.cpu })) })}
     ${lineChart({ title: 'Memory, this project', series: 2, max: memMax, fmt: fmtMem, ticks: [0, memMax / 2, memMax], points: sum.map((s) => ({ at: s.at, v: s.mem })) })}
   </div>`;
 }
@@ -178,6 +178,11 @@ export function drawCharts() {
   const m = state.machine;
   for (const el of document.querySelectorAll<HTMLElement>('[data-machine]')) {
     const k = el.dataset.machine;
-    el.textContent = !m ? '...' : k === 'cpu' ? fmtPct(m.cpu) : k === 'mem' ? `${(m.memUsed / 1073741824).toFixed(1)} / ${fmtMem(m.memTotal)}` : fmtDur(m.uptime * 1000);
+    el.textContent = !m ? '...' : k === 'cpu' ? fmtPct(m.cpu) : k === 'mem' ? fmtMem(m.memUsed) : k === 'memTotal' ? `of ${fmtMem(m.memTotal)}` : fmtDur(m.uptime * 1000);
+  }
+  // Meters under the stat strip: CPU load and share of memory in use.
+  for (const el of document.querySelectorAll<HTMLElement>('[data-meter]')) {
+    const v = !m ? 0 : el.dataset.meter === 'cpu' ? m.cpu ?? 0 : (m.memUsed / m.memTotal) * 100;
+    el.style.setProperty('--v', (Math.min(v, 100) / 100).toFixed(3));
   }
 }

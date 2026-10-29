@@ -10,7 +10,7 @@ import { loadDb, loadRequirements } from './views/pages.ts';
 import {
   applyTheme, nextTheme, crashed, toggleNotify, renderNotify, openImport, openServiceDialog, openLog, loadLog, stopLogFollow,
   loadGit, gitSelect, gitRun, gitCommit, drawGit, loadEnv, saveEnv, drawEnv, openSettings, loadSettings, drawSettings,
-  openPalette, filterPalette, paletteKey, runPalette,
+  openPalette, filterPalette, paletteKey, runPalette, ask, initAsk,
 } from './views/panels.ts';
 
 // ---------- live updates ----------
@@ -69,6 +69,7 @@ async function dbAction(label: string, url: string, body: unknown, done?: (r: an
 
 const actions: Record<string, Handler> = {
   home: () => { state.selected = null; persist(); render(); },
+  nav: () => document.body.classList.toggle('nav-open'),
   select: (_, { pid }) => { state.selected = pid!; persist(); render(); },
   page: (b, { pid }) => go(pid!, b.dataset.page!),
   'env-tab': (_, { pid }) => go(pid!, 'env'),
@@ -118,7 +119,10 @@ const actions: Record<string, Handler> = {
   'edit-service': (_, { sid }) => openServiceDialog(state.config.services.find((x) => x.id === sid)),
   'remove-service': async (_, { sid }) => {
     const svc = state.config.services.find((x) => x.id === sid);
-    if (svc && confirm(`Remove "${svc.name}"? A running instance is stopped.`)) { state.config = await api('POST', '/api/services/remove', { id: sid }); render(); }
+    if (svc && await ask({ title: `Remove ${svc.name}?`, text: 'A running instance is stopped. The command and log paths are forgotten.', ok: 'Remove', danger: true })) {
+      state.config = await api('POST', '/api/services/remove', { id: sid });
+      render();
+    }
   },
   'detect-xampp': async () => { state.config = await api('POST', '/api/services/detect-xampp', {}); render(); },
   'close-service': () => $<HTMLDialogElement>('#service-dialog').close(),
@@ -134,18 +138,22 @@ const actions: Record<string, Handler> = {
   'db-refresh': () => loadDb(true),
   'db-folder': () => api('POST', '/api/db/open-folder'),
   'db-backup': (b) => dbAction(`Backing up ${b.dataset.db}`, '/api/db/backup', { name: b.dataset.db }, (r) => toast(`Saved ${r.file}`)),
-  'db-restore': (b) => {
-    if (confirm(`Restore "${b.dataset.db}" from ${b.dataset.file}?\n\nThe current database is backed up automatically first.`)) {
+  'db-restore': async (b) => {
+    if (await ask({ title: `Restore ${b.dataset.db}?`, text: `From ${b.dataset.file}. The current database is backed up automatically first, so this can be undone.`, ok: 'Restore', danger: true })) {
       return dbAction(`Restoring ${b.dataset.db}`, '/api/db/restore', { file: b.dataset.file }, (r) => toast(r.safety ? `Restored. Previous state saved as ${r.safety}` : 'Restored.'));
     }
   },
-  'db-delete': (b) => { if (confirm(`Delete ${b.dataset.file}? This cannot be undone.`)) return dbAction('Deleting', '/api/db/delete-backup', { file: b.dataset.file }); },
+  'db-delete': async (b) => {
+    if (await ask({ title: 'Delete this backup?', text: `${b.dataset.file} is removed from disk. This cannot be undone.`, ok: 'Delete', danger: true })) return dbAction('Deleting', '/api/db/delete-backup', { file: b.dataset.file });
+  },
   'db-creds': async () => {
-    const user = prompt('MySQL user', state.config.mysql?.user || 'root');
-    if (user === null) return;
-    const password = prompt(`Password for ${user} (empty for XAMPP's default root)`, '');
-    if (password === null) return;
-    await api('POST', '/api/db/credentials', { user, password });
+    const r = await ask({ title: 'MySQL credentials', text: 'Used for listing, backups and restores. Stored in data/, never sent to the browser.', ok: 'Save', fields: [
+      { name: 'user', label: 'User', value: state.config.mysql?.user || 'root' },
+      { name: 'password', label: 'Password', type: 'password', hint: "Leave empty for XAMPP's default root account." },
+    ] });
+    if (!r) return;
+    await api('POST', '/api/db/credentials', r);
+    toast('MySQL credentials saved.');
     loadDb(true);
   },
   'backup-schedule-save': async () => {
@@ -178,11 +186,17 @@ const actions: Record<string, Handler> = {
     f.reset();
     await loadSettings();
   },
-  'user-delete': async (b) => { if (confirm(`Delete account "${b.dataset.name}"? Its devices are signed out.`)) { await api('POST', '/api/users/delete', { id: b.dataset.uid }); await loadSettings(); } },
+  'user-delete': async (b) => {
+    if (!await ask({ title: `Delete ${b.dataset.name}?`, text: 'The account is removed and every device it signed in on is signed out.', ok: 'Delete account', danger: true })) return;
+    await api('POST', '/api/users/delete', { id: b.dataset.uid });
+    await loadSettings();
+  },
   'user-password': async (b) => {
-    const password = prompt(`New password for ${b.dataset.name} (min. 8 characters). All its devices get signed out.`);
-    if (!password) return;
-    await api('POST', '/api/users/password', { id: b.dataset.uid, password });
+    const r = await ask({ title: `New password for ${b.dataset.name}`, text: 'Every device signed in with this account is signed out.', ok: 'Change password', fields: [
+      { name: 'password', label: 'New password', type: 'password', min: 8, hint: 'At least 8 characters.' },
+    ] });
+    if (!r) return;
+    await api('POST', '/api/users/password', { id: b.dataset.uid, password: r.password });
     toast('Password changed.');
     if (Number(b.dataset.uid) === state.me.userId) location.href = '/login.html'; else await loadSettings();
   },
@@ -200,9 +214,11 @@ const actions: Record<string, Handler> = {
   },
   'mfa-cancel': () => { state.settings.mfa = null; drawSettings(); },
   'mfa-disable': async (b) => {
-    const code = state.me.local ? '' : prompt('Enter a current code from your authenticator app to turn MFA off.');
-    if (code === null || (state.me.local && !confirm(`Turn off two-factor for ${b.dataset.name}?`))) return;
-    await api('POST', '/api/users/mfa/disable', { id: b.dataset.uid, code });
+    const r = await ask(state.me.local
+      ? { title: `Turn off two-factor for ${b.dataset.name}?`, text: 'Signing in will only need the password.', ok: 'Turn off', danger: true }
+      : { title: 'Turn off two-factor', text: 'Enter a current code from your authenticator app.', ok: 'Turn off', danger: true, fields: [{ name: 'code', label: 'Code', numeric: true, placeholder: '123456' }] });
+    if (!r) return;
+    await api('POST', '/api/users/mfa/disable', { id: b.dataset.uid, code: r.code || '' });
     await loadSettings();
   },
   'session-revoke': async (b) => { await api('POST', '/api/sessions/revoke', { id: b.dataset.sid }); if (b.dataset.current) location.href = '/login.html'; else await loadSettings(); },
@@ -214,6 +230,8 @@ document.addEventListener('click', async (e) => {
   if (!btn || target.closest('a') || target.matches('input[type=checkbox]')) return;
   e.stopPropagation();
   const ids = { pid: dataOf(btn, 'pid'), aid: dataOf(btn, 'aid'), tid: dataOf(btn, 'tid'), sid: dataOf(btn, 'sid') };
+  // On phones the sidebar is a drawer: picking something in it closes it.
+  if (btn.closest('.sidebar') && ['home', 'select', 'focus', 'import', 'settings', 'edit-service'].includes(btn.dataset.act!)) document.body.classList.remove('nav-open');
   try { await actions[btn.dataset.act!]?.(btn, ids); } catch (err) { toast((err as Error).message, true); }
 });
 
@@ -243,6 +261,7 @@ document.addEventListener('change', async (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 'k') { e.preventDefault(); openPalette(); }
+  if (e.key === 'Escape') document.body.classList.remove('nav-open');
   // Rows, tabs and cards that are divs act like buttons from the keyboard too.
   const el = e.target as HTMLElement;
   if ((e.key === 'Enter' || e.key === ' ') && el.matches?.('[data-act][tabindex]:not(button, a, input)')) { e.preventDefault(); el.click(); }
@@ -276,6 +295,7 @@ form('#service-form').addEventListener('submit', async (e) => {
   } catch (err) { $('#service-error').textContent = (err as Error).message; }
 });
 $('#log-dialog').addEventListener('close', stopLogFollow);
+initAsk();
 $('#palette-input').addEventListener('input', filterPalette);
 $('#palette-input').addEventListener('keydown', paletteKey);
 $('#palette-list').addEventListener('click', (e) => {

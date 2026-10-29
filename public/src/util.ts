@@ -23,7 +23,8 @@ export const fmtDur = (ms: number) => {
 export const ago = (ms: number | null | undefined) => ms ? `${fmtDur(Date.now() - ms).split(' ')[0]} ago` : 'never';
 export const fmtMem = (b: number) => b >= 1073741824 ? `${(b / 1073741824).toFixed(1)} GB` : `${Math.round(b / 1048576)} MB`;
 export const fmtSize = (n: number) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
-export const fmtPct = (n: number | null | undefined) => n == null ? '...' : `${n.toFixed(1)}%`;
+/** One decimal under 10 %, whole numbers above: the same text on tiles, charts, chips and tooltips. */
+export const fmtPct = (n: number | null | undefined) => n == null ? '...' : n === 0 ? '0%' : n < 10 ? `${n.toFixed(1)}%` : `${Math.round(n)}%`;
 export const hue = (s: string) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
 
 /** Toasts stack in one live region, so screen readers announce them and two at once don't overlap. */
@@ -37,9 +38,16 @@ export function toast(text: string, error = false) {
   const el = document.createElement('div');
   el.className = `toast${error ? ' err' : ''}`;
   el.setAttribute('role', error ? 'alert' : 'status');
-  el.textContent = text;
+  el.innerHTML = `<i class="ph-fill ${error ? 'ph-warning-circle' : 'ph-check-circle'}"></i><span class="toast-text"></span>
+    <button class="icon-btn" title="Dismiss"><i class="ph ph-x"></i></button>`;
+  el.querySelector('.toast-text')!.textContent = text;
+  const close = () => { el.classList.add('out'); setTimeout(() => el.remove(), 200); };
+  el.querySelector('button')!.onclick = close;
+  // Errors stay longer: they usually need reading.
+  let timer = setTimeout(close, error ? 7000 : 4000);
+  el.onpointerenter = () => clearTimeout(timer);
+  el.onpointerleave = () => { timer = setTimeout(close, 2000); };
   box.append(el);
-  setTimeout(() => el.remove(), 4000);
 }
 
 /** Read a data-* attribute from the nearest element that has it. */

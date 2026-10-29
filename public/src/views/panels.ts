@@ -2,7 +2,7 @@
 import type { GitFile, Project, Service, TermMeta } from '../../../types.ts';
 import { $, esc, ago, toast, store } from '../util.ts';
 import { api, send } from '../net.ts';
-import { state, persist, SERVICES, projectOf, serviceState } from '../state.ts';
+import { state, persist, SERVICES, projectOf, serviceState, emptyState, skeletonRows } from '../state.ts';
 import { render } from '../render.ts';
 import { focusTerm, runScript, xtermTheme } from '../terminals.ts';
 
@@ -47,6 +47,45 @@ export function renderNotify() {
   $('#notify-btn').innerHTML = `<i class="ph ${state.notify ? 'ph-bell-ringing' : 'ph-bell-slash'}"></i>`;
   $('#notify-btn').classList.toggle('on', state.notify);
   $('#notify-btn').title = state.notify ? 'Crash notifications on' : 'Crash notifications off';
+}
+
+// ---------- ask: the app's own confirm / prompt ----------
+export interface AskField { name: string; label: string; type?: 'text' | 'password'; value?: string; placeholder?: string; hint?: string; numeric?: boolean; min?: number }
+export interface AskOptions { title: string; text?: string; fields?: AskField[]; ok?: string; danger?: boolean }
+let askDone: ((v: Record<string, string> | null) => void) | null = null;
+/** Resolves with the field values, or null when cancelled. Passwords are typed into real password inputs, never prompt(). */
+export function ask(o: AskOptions): Promise<Record<string, string> | null> {
+  askDone?.(null);
+  const dlg = $<HTMLDialogElement>('#ask');
+  $('#ask-title').textContent = o.title;
+  $('#ask-text').textContent = o.text || '';
+  $('#ask-text').hidden = !o.text;
+  $('#ask-error').textContent = '';
+  $('#ask-fields').innerHTML = (o.fields || []).map((f, i) => `<div class="ask-field">
+    <label for="ask-${i}">${esc(f.label)}</label>
+    <input id="ask-${i}" name="${esc(f.name)}" class="field${f.numeric || f.type === 'password' ? ' mono' : ''}" type="${f.type || 'text'}" value="${esc(f.value || '')}"
+      placeholder="${esc(f.placeholder || '')}" autocomplete="${f.type === 'password' ? 'new-password' : 'off'}" spellcheck="false"
+      ${f.numeric ? 'inputmode="numeric" maxlength="6"' : ''} ${f.min ? `minlength="${f.min}" required` : ''}>
+    ${f.hint ? `<span class="muted small">${esc(f.hint)}</span>` : ''}</div>`).join('');
+  const ok = $<HTMLButtonElement>('#ask-ok');
+  ok.textContent = o.ok || 'OK';
+  ok.classList.toggle('danger', !!o.danger);
+  dlg.showModal();
+  ($<HTMLInputElement>('#ask-fields input') || ok).focus();
+  return new Promise((resolve) => { askDone = (v) => { askDone = null; resolve(v); }; });
+}
+export function initAsk() {
+  const dlg = $<HTMLDialogElement>('#ask');
+  $('#ask-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const values = Object.fromEntries([...new FormData(e.target as HTMLFormElement)].map(([k, v]) => [k, String(v)]));
+    const done = askDone;
+    askDone = null;
+    dlg.close();
+    done?.(values);
+  });
+  $('#ask-cancel').addEventListener('click', () => dlg.close());
+  dlg.addEventListener('close', () => askDone?.(null));
 }
 
 // ---------- import + service dialogs ----------
@@ -159,8 +198,8 @@ export function drawGit() {
   if (!v || page.dataset.view !== `git:${v.projectId}`) return;
   const msg = $<HTMLTextAreaElement>('#git-msg')?.value ?? v.message;
   const focused = document.activeElement?.id === 'git-msg';
-  if (!v.data && !v.error) { page.innerHTML = '<div class="git-empty muted">Reading repository...</div>'; return; }
-  if (!v.data) { page.innerHTML = `<div class="page-inner"><div class="empty-box"><strong>No git here</strong>${esc(v.error)}</div></div>`; return; }
+  if (!v.data && !v.error) { page.innerHTML = `<div class="page-inner" aria-busy="true"><div class="list">${skeletonRows(6)}</div></div>`; return; }
+  if (!v.data) { page.innerHTML = `<div class="page-inner">${emptyState('ph-git-branch', 'No git here', esc(v.error))}</div>`; return; }
   const d = v.data;
   const busy = v.busy ? 'disabled' : '';
   page.innerHTML = `<div class="git">
@@ -336,7 +375,7 @@ function paletteSource(): PalItem[] {
     items.push({ icon: 'ph-folder', label: p.name, hint: 'Open project', run: go(p.id, 'overview') });
     items.push({ icon: 'ph-git-branch', label: `${p.name}: Git`, hint: state.git[p.id]?.changed ? `${state.git[p.id].changed} changed` : 'Git', run: go(p.id, 'git') });
     if (p.apps.some((a) => a.autostart)) items.push({ icon: 'ph-play', label: `${p.name}: Start all`, hint: 'Starred scripts', run: () => { go(p.id, 'overview')(); send({ t: 'startAll', projectId: p.id }); } });
-    for (const a of p.apps) for (const s of a.scripts) items.push({ icon: 'ph-terminal', label: `${p.name} / ${a.name}: ${s}`, hint: a.cmds?.[s] || '', run: () => runScript(a.id, s) });
+    for (const a of p.apps) for (const s of a.scripts) items.push({ icon: 'ph-terminal', label: `${a.name === p.name ? p.name : `${p.name} / ${a.name}`}: ${s}`, hint: a.cmds?.[s] || '', run: () => runScript(a.id, s) });
   }
   for (const svc of state.config.services) {
     const up = ['running', 'external'].includes(serviceState(svc));

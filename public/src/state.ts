@@ -91,6 +91,12 @@ export const projectSub = (p: Project) => p.apps.length > 1 || p.apps[0]?.name !
   : (p.apps[0]?.stack || []).slice(0, 3).join(', ') || p.apps[0]?.pm || '';
 
 // ---------- small HTML pieces ----------
+/** Empty state: icon, title, one line of what to do, optional actions. compact = one row, for inside a section. */
+export const emptyState = (icon: string, title: string, text = '', actions = '', compact = false) => `<div class="empty-box${compact ? ' compact' : ''}">
+  <span class="empty-media"><i class="ph ${icon}"></i></span><strong>${title}</strong>${text ? `<p>${text}</p>` : ''}
+  ${actions ? `<div class="empty-actions">${actions}</div>` : ''}</div>`;
+/** Placeholder rows while a list loads, sized like the rows that replace them. */
+export const skeletonRows = (n = 3) => `<div class="skeleton">${Array.from({ length: n }, (_, i) => `<div class="skel-row"><span class="skel" style="width:16px;height:16px;border-radius:50%"></span><span class="skel" style="width:${[38, 26, 32, 22][i % 4]}%"></span><span class="skel" style="width:${[18, 24, 14, 20][i % 4]}%;margin-left:auto"></span></div>`).join('')}</div>`;
 /** Live counter: the 1 s ticker in main.ts updates every [data-since]. */
 export const since = (ms: number | null | undefined) => ms ? `<span class="uptime" data-since="${ms}">${fmtDur(Date.now() - ms)}</span>` : '';
 export const uptime = (m: TermMeta | undefined) => m?.status === 'running' ? since(m.startedAt) : '';

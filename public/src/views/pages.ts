@@ -4,7 +4,7 @@ import { esc, fmtDur, fmtSize } from '../util.ts';
 import { api } from '../net.ts';
 import {
   state, SERVICES, termsOf, termFor, statusOf, projectOf, portOwner, serviceTerm, serviceState, visibleProjects,
-  since, uptime, statChip, portLink, avatar, gitLine,
+  since, uptime, statChip, portLink, avatar, gitLine, emptyState, skeletonRows,
 } from '../state.ts';
 import { usageCharts, processTable, processRows } from '../charts.ts';
 import { render } from '../render.ts';
@@ -15,28 +15,28 @@ export function dashboardPage(): string {
   if (!projects.length) {
     return `<div class="page-inner"><div class="hero"><h1>Your projects, one place</h1>
       <p class="muted">Import a project or add the folder where you keep them. Scripts from every package.json become one-click terminals.</p></div>
-      <div class="empty-box"><strong>No projects yet</strong>Start with your workspace folder, like Desktop\\code.<br>
-        <button class="btn btn-primary" data-act="import" data-kind="root"><i class="ph ph-folder-plus"></i>Add workspace</button>
-        <button class="btn" data-act="import" data-kind="project"><i class="ph ph-download-simple"></i>Import one project</button></div></div>`;
+      ${emptyState('ph-folders', 'No projects yet', 'Start with your workspace folder, like Desktop\\code.',
+        `<button class="btn btn-primary" data-act="import" data-kind="root"><i class="ph ph-folder-plus"></i>Add workspace</button>
+        <button class="btn" data-act="import" data-kind="project"><i class="ph ph-download-simple"></i>Import one project</button>`)}</div>`;
   }
   const failed = termsOf((m) => statusOf([m]) === 'error');
   const procs = processRows();
   const list = visibleProjects();
   return `<div class="page-inner">
     <div class="stats">
-      <div class="stat"><b data-machine="cpu">...</b><span>CPU, whole PC</span></div>
-      <div class="stat"><b data-machine="mem">...</b><span>memory used</span></div>
-      <div class="stat"><b>${procs.length}</b><span>running${failed.length ? `, <em class="bad">${failed.length} crashed</em>` : ''}</span></div>
-      <div class="stat"><b data-machine="uptime">...</b><span>PC uptime</span></div>
+      <div class="stat"><span>CPU</span><b data-machine="cpu">...</b><i class="meter s1" data-meter="cpu"></i></div>
+      <div class="stat"><span>Memory <small data-machine="memTotal"></small></span><b data-machine="mem">...</b><i class="meter s2" data-meter="mem"></i></div>
+      <div class="stat"><span>Processes</span><b>${procs.length}${failed.length ? ` <em class="bad">${failed.length} crashed</em>` : ''}</b></div>
+      <div class="stat"><span>PC uptime</span><b data-machine="uptime">...</b></div>
     </div>
     <section><h2>Resources <span class="muted">last hour</span></h2><div data-usage="machine">${usageCharts()}</div></section>
-    <section><h2>Processes <span class="muted">${procs.length}</span></h2><div data-proc-table="">${processTable(procs)}</div></section>
     ${failed.length ? `<section><h2>Crashed</h2><div class="list">${failed.map((m) => `
       <div class="list-row click" tabindex="0" data-act="focus" data-tid="${m.id}">
         <span class="dot error"></span>
         <div class="grow"><div>${esc(m.title)}</div><div class="sub">${esc(projectOf(m.projectId)?.name)}, ${m.conflict ? `port ${m.conflict} was busy` : `exit code ${m.code}`}${m.endedAt ? `, ${fmtDur(Date.now() - m.endedAt)} ago` : ''}</div></div>
         <button class="btn sm" data-act="restart"><i class="ph ph-arrow-clockwise"></i>Restart</button>
       </div>`).join('')}</div></section>` : ''}
+    <section><h2>Processes <span class="muted">${procs.length}</span></h2><div data-proc-table="">${processTable(procs)}</div></section>
     <section>
       <h2>Projects <span class="muted">${list.length}</span></h2>
       <div class="cards">${list.map((p) => {
@@ -44,8 +44,8 @@ export function dashboardPage(): string {
         const stack = [...new Set(p.apps.flatMap((a) => a.stack || []))].slice(0, 5);
         return `<button class="card" data-act="select" data-pid="${esc(p.id)}">
           <div class="card-head">${avatar(p)}${esc(p.name)}${n ? `<span class="count">${n} running</span>` : ''}</div>
-          <div class="tags">${p.apps.map((a) => `<span class="tag">${esc(a.name)}</span>`).join('')}${stack.map((s) => `<span class="tag accent">${esc(s)}</span>`).join('')}</div>
-          <div class="sub git-line">${gitLine(p) || esc(p.path)}</div>
+          <div class="tags">${p.apps.filter((a) => a.name !== p.name).map((a) => `<span class="tag">${esc(a.name)}</span>`).join('')}${stack.map((s) => `<span class="tag accent">${esc(s)}</span>`).join('')}</div>
+          <div class="sub ${gitLine(p) ? 'git-line' : 'clip-start'}">${gitLine(p) || `<bdi>${esc(p.path)}</bdi>`}</div>
         </button>`;
       }).join('')}</div>
     </section>
@@ -54,7 +54,7 @@ export function dashboardPage(): string {
       <div class="list">${[...roots.map((r) => ['root', r]), ...manual.map((r) => ['manual', r])].map(([kind, r]) => `
         <div class="list-row">
           <i class="ph ${kind === 'root' ? 'ph-folder-simple' : 'ph-app-window'} muted"></i>
-          <div class="grow"><div class="mono">${esc(r)}</div><div class="sub">${kind === 'root' ? 'Workspace, every subfolder is a project' : 'Imported project'}</div></div>
+          <div class="grow"><div class="mono clip-start" title="${esc(r)}"><bdi>${esc(r)}</bdi></div><div class="sub">${kind === 'root' ? 'Workspace, every subfolder is a project' : 'Imported project'}</div></div>
           <button class="btn sm" data-act="remove-folder" data-kind="${kind}" data-path="${esc(r)}">Remove</button>
         </div>`).join('')}</div>
     </section>
@@ -94,10 +94,11 @@ function requirementsBlock(p: Project): string {
           ? `<label class="check" title="This project uses the database ${esc(p.db)}, so ${esc(svc.name)} starts before its scripts"><input type="checkbox" checked disabled> ${esc(svc.name)} <span class="muted small">detected</span></label>`
           : `<label class="check" title="Its scripts start ${esc(svc.name)} first (if it isn't running) and wait for it"><input type="checkbox" data-proj-service="${esc(svc.id)}" ${uses.has(svc.id) ? 'checked' : ''}> ${esc(svc.name)}</label>`}`).join('')}` : ''}
     </div>
+    ${!items.length && state.requirements[p.id]?.loading ? skeletonRows(2) : ''}
     ${items.map((i) => `<div class="req-row ${i.status}">
       <i class="ph-fill ${REQ_ICON[i.status]}" aria-label="${i.status}"></i>
       <span class="req-label">${esc(i.label)}</span><span class="req-detail">${esc(i.detail)}</span>
-      ${i.fix ? `<button class="btn sm" data-act="req-fix" data-kind="${i.fix.kind}" data-arg="${esc(i.fix.arg)}">${esc(i.fix.label)}</button>` : '<span></span>'}
+      ${i.fix ? `<button class="btn sm${i.status === 'fail' ? ' btn-primary' : ''}" data-act="req-fix" data-kind="${i.fix.kind}" data-arg="${esc(i.fix.arg)}">${esc(i.fix.label)}</button>` : '<span></span>'}
     </div>`).join('')}
   </section>`;
 }
@@ -135,8 +136,7 @@ export function overviewPage(p: Project): string {
           <span class="dot ${statusOf(appTerms)}"></span><h3>${esc(a.name)}</h3>
           <div class="tags"><span class="tag">${esc(a.pm)}</span>${a.version ? `<span class="tag">v${esc(a.version)}</span>` : ''}${(a.stack || []).map((s) => `<span class="tag accent">${esc(s)}</span>`).join('')}</div>
           <div class="actions">
-            ${a.install && a.install !== 'ok' ? `<span class="tag warn">${a.install === 'missing' ? 'not installed' : 'deps missing'}</span>
-              <button class="btn sm btn-primary" data-act="install"><i class="ph ph-download-simple"></i>${esc(a.pm)} install</button>` : ''}
+            ${a.install && a.install !== 'ok' ? `<span class="tag err" title="Fix it under Requirements">${a.install === 'missing' ? 'not installed' : 'deps missing'}</span>` : ''}
             <button class="btn sm" data-act="shell"><i class="ph ph-terminal-window"></i>Shell</button>
             ${a.path !== p.path ? `<button class="icon-btn host-only" data-act="open" data-with="code" data-path="${esc(a.path)}" title="Open ${esc(rel)} in VS Code"><i class="ph ph-code"></i></button>` : ''}
           </div>
@@ -176,7 +176,7 @@ export async function loadDb(force = false) {
 function dockerSection(): string {
   const d = state.docker;
   if (!d.available) return '';
-  if (!d.running) return '<section><h2>Docker</h2><div class="empty-box"><strong>Docker engine is not running</strong>Start Docker Desktop and containers show up here.</div></section>';
+  if (!d.running) return `<section><h2>Docker</h2>${emptyState('ph-cube', 'Docker engine is not running', 'Start Docker Desktop and containers show up here.', '', true)}</section>`;
   return `<section><h2>Docker <span class="muted">${d.containers.filter((c) => c.State === 'running').length} of ${d.containers.length} running</span></h2>
     ${d.containers.length ? `<div class="list">${d.containers.map((c) => {
       const up = c.State === 'running';
@@ -189,14 +189,14 @@ function dockerSection(): string {
           : '<button class="btn sm" data-act="docker" data-action="start"><i class="ph-fill ph-play"></i>Start</button>'}
         <button class="btn sm" data-act="docker-logs"><i class="ph ph-file-text"></i>Logs</button>
       </div>`;
-    }).join('')}</div>` : '<div class="empty-box">No containers yet.</div>'}
+    }).join('')}</div>` : emptyState('ph-cube', 'No containers yet', '', '', true)}
   </section>`;
 }
 
 function databaseSection(): string {
   if (!state.config.services.some((s) => s.id === 'xampp-mysql')) return '';
   const info = state.dbInfo;
-  if (!info) return '<section><h2>Databases</h2><div class="empty-box">Loading...</div></section>';
+  if (!info) return `<section><h2>Databases</h2><div class="list">${skeletonRows(3)}</div></section>`;
   const dbs = (info.databases || []).filter((d) => !d.system);
   const sc = info.schedule;
   return `<section>
@@ -206,13 +206,13 @@ function databaseSection(): string {
         <button class="btn sm host-only" data-act="db-folder"><i class="ph ph-folder-open"></i>Backups folder</button>
         <button class="btn sm" data-act="db-creds"><i class="ph ph-user"></i>Credentials</button>
       </span></h2>
-    ${info.error ? `<div class="empty-box"><strong>Can't read databases</strong>${esc(info.error)}</div>`
+    ${info.error ? emptyState('ph-plugs', "Can't read databases", esc(info.error), '', true)
       : dbs.length ? `<div class="list">${dbs.map((d) => `
         <div class="list-row"><i class="ph ph-database muted"></i>
           <div class="grow"><div class="mono">${esc(d.name)}</div><div class="sub">${d.tables} tables, ${fmtSize(d.size)}</div></div>
           <a class="btn sm" href="/phpmyadmin/index.php?route=/database/structure&db=${encodeURIComponent(d.name)}" target="_blank" rel="noopener">phpMyAdmin</a>
           <button class="btn sm" data-act="db-backup" data-db="${esc(d.name)}" ${state.dbBusy ? 'disabled' : ''}><i class="ph ph-floppy-disk"></i>Backup</button>
-        </div>`).join('')}</div>` : '<div class="empty-box">No databases yet. Create one in phpMyAdmin.</div>'}
+        </div>`).join('')}</div>` : emptyState('ph-database', 'No databases yet', 'Create one in phpMyAdmin.', '', true)}
     <form id="backup-form" class="backup-form" onsubmit="return false">
       <label class="check"><input type="checkbox" name="enabled" ${sc?.enabled ? 'checked' : ''}> Automatic backups every</label>
       <input class="field mono" name="everyHours" type="number" min="1" max="168" value="${sc?.everyHours || 24}" aria-label="Hours between backups"><span class="muted">hours, keep the last</span>
@@ -227,7 +227,7 @@ function databaseSection(): string {
         <div class="grow"><div class="mono">${esc(b.file)}</div><div class="sub">${esc(b.name)}, ${fmtSize(b.size)}, ${new Date(b.at).toLocaleString()}${({ 'pre-restore': ', copy made before a restore', auto: ', automatic', 'pre-pull': ', made before git pull' } as Record<string, string>)[b.kind] || ''}</div></div>
         <button class="btn sm" data-act="db-restore" data-file="${esc(b.file)}" data-db="${esc(b.name)}" ${state.dbBusy ? 'disabled' : ''}><i class="ph ph-clock-counter-clockwise"></i>Restore</button>
         <button class="icon-btn" data-act="db-delete" data-file="${esc(b.file)}" title="Delete backup"><i class="ph ph-trash"></i></button>
-      </div>`).join('')}</div>` : '<div class="empty-box">No backups yet. They are plain .sql files in Devdeck\'s data/backups folder.</div>'}
+      </div>`).join('')}</div>` : emptyState('ph-file-sql', 'No backups yet', "They are plain .sql files in Devdeck's data/backups folder.", '', true)}
   </section>`;
 }
 
@@ -235,10 +235,9 @@ export function servicesPage(): string {
   loadDb();
   const services = state.config.services;
   if (!services.length) {
-    return `<div class="page-inner"><div class="empty-box"><strong>No services yet</strong>
-      A service is any long-running command: MySQL, Apache with phpMyAdmin, Redis, a Docker container.<br>
-      <button class="btn btn-primary" data-act="edit-service"><i class="ph ph-plus"></i>Add service</button>
-      <button class="btn" data-act="detect-xampp"><i class="ph ph-magic-wand"></i>Detect XAMPP</button></div>${dockerSection()}</div>`;
+    return `<div class="page-inner">${emptyState('ph-hard-drives', 'No services yet', 'A service is any long-running command: MySQL, Apache with phpMyAdmin, Redis, a Docker container.',
+      `<button class="btn btn-primary" data-act="edit-service"><i class="ph ph-plus"></i>Add service</button>
+      <button class="btn" data-act="detect-xampp"><i class="ph ph-magic-wand"></i>Detect XAMPP</button>`)}${dockerSection()}</div>`;
   }
   return `<div class="page-inner">${services.map((svc) => {
     const m = serviceTerm(svc);

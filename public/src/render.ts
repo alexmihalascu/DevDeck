@@ -37,7 +37,7 @@ function renderSidebar() {
       <span class="dot ${st}"></span>
       <span class="row-main"><span class="row-title">${esc(svc.name)}</span><span class="row-sub">${sub}</span></span>
     </button>`;
-  }).join('') || `<button class="row" data-act="select" data-pid="${SERVICES}"><span class="row-main"><span class="row-sub">MySQL, Apache, Redis... add one</span></span></button>`;
+  }).join('') || `<button class="row add-row${state.selected === SERVICES ? ' selected-soft' : ''}" data-act="select" data-pid="${SERVICES}"><i class="ph ph-plus"></i><span class="row-main"><span class="row-title">Add a service</span><span class="row-sub">MySQL, Apache, Redis...</span></span></button>`;
 
   $('[data-act=toggle-hidden]').classList.toggle('on', state.showHidden);
   const list = visibleProjects();
@@ -58,17 +58,22 @@ const viewToggle = (grid: boolean) => `<div class="seg">
   <button class="icon-btn${grid ? '' : ' on'}" data-act="view" data-view="tabs" title="One terminal at a time"><i class="ph ph-tabs"></i></button>
   <button class="icon-btn${grid ? ' on' : ''}" data-act="view" data-view="grid" title="All terminals side by side"><i class="ph ph-squares-four"></i></button></div>`;
 
+const navBtn = '<button class="icon-btn nav-btn" data-act="nav" title="Projects and services" aria-label="Open menu"><i class="ph ph-list"></i></button>';
+
 function toolbar(project: Project | undefined, grid: boolean) {
+  return navBtn + toolbarBody(project, grid);
+}
+function toolbarBody(project: Project | undefined, grid: boolean) {
   if (!project) return `<div class="tb-title"><h1>Dashboard</h1><span class="row-sub">Usage, processes and projects at a glance</span></div>
     <button class="btn" data-act="import" data-kind="project"><i class="ph ph-download-simple"></i>Import project</button>
     <button class="btn" data-act="import" data-kind="root"><i class="ph ph-folder-plus"></i>Add workspace</button>`;
   if (project.id === SERVICES) return `<div class="tb-title"><h1>Services</h1><span class="row-sub">Databases and servers that live outside your projects</span></div>
     <button class="btn btn-primary" data-act="edit-service"><i class="ph ph-plus"></i>Add service</button>
-    <button class="btn" data-act="detect-xampp"><i class="ph ph-magic-wand"></i>Detect XAMPP</button>${viewToggle(grid)}`;
+    <button class="btn" data-act="detect-xampp"><i class="ph ph-magic-wand"></i>Detect XAMPP</button>${termsOf((m) => m.projectId === SERVICES).length > 1 ? viewToggle(grid) : ''}`;
   const p = project;
   return `<div class="tb-title">
       <h1>${avatar(p, 'lg')}${esc(p.name)}<span class="git-line">${gitLine(p)}</span></h1>
-      <span class="row-sub mono" title="${esc(p.path)}">${esc(p.path)}</span>
+      <span class="row-sub mono clip-start" title="${esc(p.path)}"><bdi>${esc(p.path)}</bdi></span>
     </div>
     <button class="btn btn-primary" data-act="start-all" data-pid="${esc(p.id)}" ${p.apps.some((a) => a.autostart) ? '' : 'disabled title="Star a script first"'}><i class="ph-fill ph-play"></i>Start all</button>
     <button class="btn" data-act="stop-all" data-pid="${esc(p.id)}"><i class="ph ph-stop"></i>Stop all</button>
@@ -76,7 +81,7 @@ function toolbar(project: Project | undefined, grid: boolean) {
     <button class="icon-btn host-only" data-act="open" data-with="explorer" data-path="${esc(p.path)}" title="Open in Explorer"><i class="ph ph-folder-open"></i></button>
     <button class="icon-btn host-only" data-act="open-wt" data-pid="${esc(p.id)}" title="Open starred scripts in Windows Terminal"><i class="ph ph-arrow-square-out"></i></button>
     <button class="icon-btn" data-act="hide" data-pid="${esc(p.id)}" title="${p.hidden ? 'Unhide project' : 'Hide project'}"><i class="ph ${p.hidden ? 'ph-eye' : 'ph-eye-slash'}"></i></button>
-    ${viewToggle(grid)}`;
+    ${termsOf((m) => m.projectId === p.id).length > 1 ? viewToggle(grid) : ''}`;
 }
 
 function renderMain() {
