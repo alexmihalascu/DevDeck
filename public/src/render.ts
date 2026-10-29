@@ -90,13 +90,13 @@ function renderMain() {
   const showPage = !project || isPage(activeId);
 
   $('#toolbar').innerHTML = toolbar(project, grid);
-  const tab = (page: string, icon: string, label: string, extra = '') => `<div class="tab page-tab${activeId === page ? ' active' : ''}" role="tab" data-act="page" data-page="${page}" data-pid="${esc(project!.id)}"><i class="ph ${icon}"></i>${label}${extra}</div>`;
+  const tab = (page: string, icon: string, label: string, extra = '') => `<div class="tab page-tab${activeId === page ? ' active' : ''}" role="tab" tabindex="0" aria-selected="${activeId === page}" data-act="page" data-page="${page}" data-pid="${esc(project!.id)}"><i class="ph ${icon}"></i>${label}${extra}</div>`;
   $('#tabs').innerHTML = !project ? '' : `
     ${tab('overview', 'ph-house', 'Overview')}
     ${project.id !== SERVICES ? tab('git', 'ph-git-branch', 'Git', state.git[project.id]?.changed ? ` <span class="count-pill">${state.git[project.id].changed}</span>` : '') : ''}
     ${project.envFiles?.length ? tab('env', 'ph-key', 'Env', ` <span class="count-pill">${project.envFiles.length}</span>`) : ''}
     ${mine.map((m) => `
-      <div class="tab${m.id === activeId ? ' active' : ''}" role="tab" data-act="focus" data-tid="${m.id}">
+      <div class="tab${m.id === activeId ? ' active' : ''}" role="tab" tabindex="0" aria-selected="${m.id === activeId}" data-act="focus" data-tid="${m.id}">
         <span class="dot ${statusOf([m])}"></span>${esc(m.title)} ${portLink(m)} ${uptime(m)}${m.status === 'running' ? statChip(`t${m.id}`) : ''}
         ${m.status === 'exited' && !m.killed && m.code ? `<span class="exit">${m.conflict ? `port ${m.conflict} busy` : `exit ${m.code}`}</span>` : ''}
         ${m.status === 'running' ? '<button class="icon-btn" data-act="kill" title="Stop"><i class="ph ph-stop"></i></button>' : ''}

@@ -56,6 +56,7 @@ const STATIC: Record<string, string> = {
   '/vendor/addon-fit/': 'node_modules/@xterm/addon-fit/',
   '/vendor/phosphor/': 'node_modules/@phosphor-icons/web/src/',
   '/vendor/geist-mono/': 'node_modules/@fontsource-variable/geist-mono/',
+  '/vendor/geist/': 'node_modules/@fontsource-variable/geist/',
   '/': 'public/',
 };
 const TYPES: Record<string, string> = {

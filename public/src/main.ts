@@ -243,6 +243,9 @@ document.addEventListener('change', async (e) => {
 
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 'k') { e.preventDefault(); openPalette(); }
+  // Rows, tabs and cards that are divs act like buttons from the keyboard too.
+  const el = e.target as HTMLElement;
+  if ((e.key === 'Enter' || e.key === ' ') && el.matches?.('[data-act][tabindex]:not(button, a, input)')) { e.preventDefault(); el.click(); }
   if ((e.target as HTMLElement).id === 'git-msg' && e.ctrlKey && e.key === 'Enter') gitCommit();
 });
 

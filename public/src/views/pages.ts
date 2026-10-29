@@ -32,7 +32,7 @@ export function dashboardPage(): string {
     <section><h2>Resources <span class="muted">last hour</span></h2><div data-usage="machine">${usageCharts()}</div></section>
     <section><h2>Processes <span class="muted">${procs.length}</span></h2><div data-proc-table="">${processTable(procs)}</div></section>
     ${failed.length ? `<section><h2>Crashed</h2><div class="list">${failed.map((m) => `
-      <div class="list-row click" data-act="focus" data-tid="${m.id}">
+      <div class="list-row click" tabindex="0" data-act="focus" data-tid="${m.id}">
         <span class="dot error"></span>
         <div class="grow"><div>${esc(m.title)}</div><div class="sub">${esc(projectOf(m.projectId)?.name)}, ${m.conflict ? `port ${m.conflict} was busy` : `exit code ${m.code}`}${m.endedAt ? `, ${fmtDur(Date.now() - m.endedAt)} ago` : ''}</div></div>
         <button class="btn sm" data-act="restart"><i class="ph ph-arrow-clockwise"></i>Restart</button>
@@ -268,7 +268,7 @@ export function servicesPage(): string {
         </div>
       </div>
       <div class="script-row"><i class="ph ph-terminal muted center"></i><span class="name">command</span><span class="cmd" title="${esc(svc.cmd)}">${esc(svc.cmd)}</span><span></span></div>
-      ${svc.logs.map((f) => `<div class="script-row click" data-act="log" data-file="${esc(f)}">
+      ${svc.logs.map((f) => `<div class="script-row click" tabindex="0" data-act="log" data-file="${esc(f)}">
         <i class="ph ph-file-text muted center"></i><span class="name">${esc(f.split(/[\\/]/).pop())}</span>
         <span class="cmd" title="${esc(f)}">${esc(f)}</span><span class="meta"><span class="btn sm">View log</span></span></div>`).join('')}
     </section>`;

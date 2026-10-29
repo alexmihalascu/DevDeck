@@ -184,7 +184,7 @@ export function drawGit() {
         <div class="git-files">${d.files.map((f) => {
           const code = statusCode(f);
           const slash = f.path.lastIndexOf('/');
-          return `<div class="git-file${v.file === f.path ? ' active' : ''}" data-act="git-file" data-file="${esc(f.path)}">
+          return `<div class="git-file${v.file === f.path ? ' active' : ''}" tabindex="0" data-act="git-file" data-file="${esc(f.path)}">
             <input type="checkbox" data-check="${esc(f.path)}" ${v.checked.has(f.path) ? 'checked' : ''} aria-label="Include ${esc(f.path)}">
             <span class="fname">${esc(f.path.slice(slash + 1))}</span><span class="fdir">${esc(f.path.slice(0, slash + 1))}</span>
             <span class="st st-${code === 'new' ? 'A' : esc(code)}">${code === 'new' ? 'U' : esc(code)}</span>
@@ -192,7 +192,7 @@ export function drawGit() {
         }).join('') || '<p class="muted small pad">Working tree clean.</p>'}</div>
         <div class="git-head"><span>History</span></div>
         <div class="git-log">${d.log.map((c) => `
-          <div class="git-commit-row${v.commit === c.hash ? ' active' : ''}" data-act="git-commit-show" data-hash="${c.hash}">
+          <div class="git-commit-row${v.commit === c.hash ? ' active' : ''}" tabindex="0" data-act="git-commit-show" data-hash="${c.hash}">
             <div class="subject">${esc(c.subject)}</div>
             <div class="muted small">${esc(c.short)} · ${esc(c.author)} · ${ago(c.at)}${c.refs ? ` <span class="refs">${esc(c.refs.replace('HEAD -> ', ''))}</span>` : ''}</div>
           </div>`).join('') || '<p class="muted small pad">No commits yet.</p>'}</div>

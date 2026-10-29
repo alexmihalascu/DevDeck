@@ -45,17 +45,20 @@ export function lineChart(spec: LineSpec): string {
   };
   for (const p of points) { if (p.v == null) flush(); else run.push(`${x(p.at).toFixed(2)},${y(p.v).toFixed(2)}`); }
   flush();
+  const last = points.at(-1);
   const data = esc(JSON.stringify(points.map((p) => [p.at, p.v])));
-  return `<figure class="chart s${spec.series}" data-points="${data}" data-fmt="${spec.fmt === fmtMem ? 'mem' : 'pct'}">
+  return `<figure class="chart s${spec.series}" data-points="${data}" data-max="${max || 1}" data-fmt="${spec.fmt === fmtMem ? 'mem' : 'pct'}">
     <figcaption><span class="chart-title"><i class="key"></i>${esc(spec.title)}</span>
       <span class="chart-now">${now == null ? '...' : esc(spec.fmt(now))}</span></figcaption>
     <div class="plot">
       <div class="ticks">${spec.ticks.map((t) => `<span style="top:${y(t)}%">${esc(spec.fmt(t))}</span>`).join('')}</div>
       <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <defs><linearGradient id="fade${spec.series}" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--c);stop-opacity:.24"/><stop offset="1" style="stop-color:var(--c);stop-opacity:0"/></linearGradient></defs>
         ${spec.ticks.map((t) => `<line class="grid" x1="0" x2="100" y1="${y(t)}" y2="${y(t)}"/>`).join('')}
-        <path class="area" d="${area}"/><path class="line" d="${d}"/>
+        <path class="area" d="${area}" fill="url(#fade${spec.series})"/><path class="line" d="${d}"/>
       </svg>
-      <div class="cross" hidden></div><div class="tip" hidden></div>
+      ${last?.v != null && points.length > 1 ? `<i class="now" style="left:${x(last.at)}%;top:${y(last.v)}%"></i>` : ''}
+      <div class="cross" hidden></div><i class="cross-dot" hidden></i><div class="tip" hidden></div>
       ${points.length < 2 ? '<div class="plot-empty">Collecting samples, one every 5 seconds...</div>' : ''}
     </div>
     <div class="chart-foot"><span>last ${points.length > 1 ? fmtDur(t1 - t0) : '-'}</span><span>avg ${avg == null ? '-' : esc(spec.fmt(avg))}</span><span>peak ${peak == null ? '-' : esc(spec.fmt(peak))}</span></div>
@@ -65,20 +68,29 @@ export function lineChart(spec: LineSpec): string {
 /** Crosshair + tooltip: snaps to the nearest sample, so the reader aims at a time, not at a 2px line. */
 export function chartHover(e: PointerEvent) {
   const fig = (e.target as Element).closest('.chart') as HTMLElement | null;
-  for (const other of document.querySelectorAll<HTMLElement>('.chart .cross:not([hidden])')) if (!fig?.contains(other)) { other.hidden = true; (other.nextElementSibling as HTMLElement).hidden = true; }
-  if (!fig || e.type === 'pointerleave') return;
+  hover = fig && e.type !== 'pointerleave' ? { title: fig.querySelector('.chart-title')!.textContent!, x: e.clientX } : null;
+  for (const other of document.querySelectorAll<HTMLElement>('.chart .cross:not([hidden]), .chart .cross-dot:not([hidden]), .chart .tip:not([hidden])')) if (!fig?.contains(other) || !hover) other.hidden = true;
+  if (fig && hover) showHover(fig, hover.x);
+}
+
+/** Pointer over a chart, kept so the crosshair survives the 5 s redraw instead of vanishing until the mouse moves. */
+let hover: { title: string; x: number } | null = null;
+
+function showHover(fig: HTMLElement, clientX: number) {
   const plot = fig.querySelector('.plot') as HTMLElement;
   const pts = JSON.parse(fig.dataset.points || '[]') as [number, number | null][];
   if (pts.length < 2) return;
   const r = plot.getBoundingClientRect();
-  const frac = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1);
+  const frac = Math.min(Math.max((clientX - r.left) / r.width, 0), 1);
   const t0 = pts[0][0], t1 = pts.at(-1)![0];
   const target = t0 + frac * (t1 - t0);
   const [at, v] = pts.reduce((best, p) => Math.abs(p[0] - target) < Math.abs(best[0] - target) ? p : best);
   const left = ((at - t0) / (t1 - t0)) * 100;
-  const cross = fig.querySelector('.cross') as HTMLElement, tip = fig.querySelector('.tip') as HTMLElement;
+  const cross = fig.querySelector('.cross') as HTMLElement, tip = fig.querySelector('.tip') as HTMLElement, dot = fig.querySelector('.cross-dot') as HTMLElement;
   cross.hidden = tip.hidden = false;
   cross.style.left = `${left}%`;
+  dot.hidden = v == null;
+  if (v != null) Object.assign(dot.style, { left: `${left}%`, top: `${100 - Math.min(v / Number(fig.dataset.max || 1), 1) * 100}%` });
   tip.style.left = `${Math.min(Math.max(left, 12), 88)}%`;
   tip.replaceChildren();
   const strong = document.createElement('b');
@@ -124,7 +136,7 @@ export function processTable(rows: ProcRow[]): string {
       const s = state.stats[r.key];
       const hist = state.history.series[r.key] || [];
       const up = r.startedAt ? Date.now() - r.startedAt : 0;
-      return `<div class="proc-row${r.meta ? ' click' : ''}" ${r.meta ? `data-act="focus" data-tid="${r.meta.id}"` : ''}>
+      return `<div class="proc-row${r.meta ? ' click' : ''}" ${r.meta ? `tabindex="0" data-act="focus" data-tid="${r.meta.id}"` : ''}>
         <span class="proc-name"><span class="dot running"></span><span><b>${esc(r.label)}</b><small>${esc(r.sub)}</small></span></span>
         <span class="proc-up"><span class="bar"><i style="width:${Math.max((up / longest) * 100, 2).toFixed(1)}%"></i></span>${since(r.startedAt) || '?'}</span>
         <span class="proc-metric">${sparkline(hist, 'cpu', 1)}<span data-stat-cpu="${r.key}">${fmtPct(s?.cpu)}</span></span>
@@ -161,6 +173,7 @@ export function drawCharts() {
     const keys = el.dataset.usage === 'machine' ? undefined : processRows(el.dataset.usage).map((r) => r.key);
     el.innerHTML = usageCharts(keys);
   }
+  if (hover) for (const fig of document.querySelectorAll<HTMLElement>('.chart')) if (fig.querySelector('.chart-title')!.textContent === hover.title) showHover(fig, hover.x);
   for (const el of document.querySelectorAll<HTMLElement>('[data-proc-table]')) el.innerHTML = processTable(processRows(el.dataset.procTable || undefined));
   const m = state.machine;
   for (const el of document.querySelectorAll<HTMLElement>('[data-machine]')) {

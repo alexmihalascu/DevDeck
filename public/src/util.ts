@@ -26,11 +26,19 @@ export const fmtSize = (n: number) => n < 1024 ? `${n} B` : n < 1048576 ? `${(n 
 export const fmtPct = (n: number | null | undefined) => n == null ? '...' : `${n.toFixed(1)}%`;
 export const hue = (s: string) => [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 360, 7);
 
+/** Toasts stack in one live region, so screen readers announce them and two at once don't overlap. */
 export function toast(text: string, error = false) {
+  let box = document.querySelector('.toasts');
+  if (!box) {
+    box = Object.assign(document.createElement('div'), { className: 'toasts' });
+    box.setAttribute('aria-live', 'polite');
+    document.body.append(box);
+  }
   const el = document.createElement('div');
   el.className = `toast${error ? ' err' : ''}`;
+  el.setAttribute('role', error ? 'alert' : 'status');
   el.textContent = text;
-  document.body.append(el);
+  box.append(el);
   setTimeout(() => el.remove(), 4000);
 }
 
