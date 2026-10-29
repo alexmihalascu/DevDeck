@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Devdeck</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%224%22 fill=%22%2310b981%22/%3E%3C/svg%3E">
+  <script>
+    try { const t = localStorage.getItem('theme'); if (t === '"light"' || t === '"dark"') document.documentElement.dataset.theme = JSON.parse(t); } catch {}
+  </script>
+  <link rel="stylesheet" href="/vendor/geist-mono/index.css">
+  <link rel="stylesheet" href="/vendor/phosphor/fill/style.css">
+  <link rel="stylesheet" href="/style.css">
+  <style>
+    body { display: grid; place-items: center; grid-template-columns: 1fr; min-height: 100dvh; padding: 16px; overflow: auto; }
+    .login { width: min(360px, 100%); display: grid; gap: 10px; padding: 24px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); box-shadow: var(--shadow); }
+    .login h1 { display: flex; align-items: center; gap: 9px; font-size: 16px; margin-bottom: 6px; }
+    .login label { font-size: 12px; font-weight: 500; color: var(--muted); margin-top: 4px; }
+    .login .btn { height: 34px; margin-top: 8px; }
+    #code { letter-spacing: 6px; text-align: center; font: 600 20px "Geist Mono Variable", monospace; height: 44px; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <form class="login" id="login" autocomplete="on">
+    <h1><span class="brand-mark"><i class="ph-fill ph-stack"></i></span>Devdeck</h1>
+    <div id="step-password">
+      <label for="user">User</label>
+      <input id="user" class="field" name="username" autocomplete="username" required autofocus>
+      <label for="password">Password</label>
+      <input id="password" class="field" type="password" name="password" autocomplete="current-password" required>
+    </div>
+    <div id="step-confirm" hidden>
+      <label for="password2">Repeat password</label>
+      <input id="password2" class="field" type="password" autocomplete="new-password">
+    </div>
+    <div id="step-code" hidden>
+      <label for="code">Code from your authenticator app</label>
+      <input id="code" class="field" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="\d{6}">
+    </div>
+    <p class="form-error" id="error" role="alert"></p>
+    <button class="btn btn-primary" type="submit" id="submit">Sign in</button>
+  </form>
+  <script type="module">
+    const $ = (s) => document.querySelector(s);
+    let ticket = null;
+    const state = await (await fetch('/api/setup-state')).json().catch(() => ({}));
+    const setup = !!state.setup;
+    if (setup) {
+      document.querySelector('h1').insertAdjacentHTML('afterend', '<p class="muted">Create your account. You sign in with it on this PC and from others on your network; two-factor can be added later in Settings.</p>');
+      $('#step-confirm').hidden = false;
+      $('#password').autocomplete = 'new-password';
+      $('#submit').textContent = 'Create account';
+    }
+    async function post(url, body) {
+      const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `Error ${r.status}`);
+      return data;
+    }
+    $('#login').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      $('#error').textContent = '';
+      $('#submit').disabled = true;
+      try {
+        if (setup && $('#password').value !== $('#password2').value) throw new Error('Passwords do not match.');
+        const r = setup
+          ? await post('/api/setup', { user: $('#user').value, password: $('#password').value })
+          : ticket
+            ? await post('/api/login/mfa', { ticket, code: $('#code').value.trim() })
+            : await post('/api/login', { user: $('#user').value, password: $('#password').value });
+        if (r.mfa) {
+          ticket = r.ticket;
+          $('#step-password').hidden = true;
+          $('#step-code').hidden = false;
+          $('#submit').textContent = 'Verify';
+          $('#code').focus();
+        } else location.href = '/';
+      } catch (err) {
+        $('#error').textContent = err.message;
+        if (/expired/i.test(err.message)) { ticket = null; $('#step-password').hidden = false; $('#step-code').hidden = true; $('#submit').textContent = 'Sign in'; }
+      }
+      $('#submit').disabled = false;
+    });
+    $('#code').addEventListener('input', (e) => { if (/^\d{6}$/.test(e.target.value)) $('#login').requestSubmit(); });
+  </script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+{
+  // Browser code. Never compiled: the server strips the types when it sends a .ts file.
+  "compilerOptions": {
+    "target": "es2023",
+    "lib": ["es2023", "dom", "dom.iterable"],
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "types": [],
+    "strict": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "erasableSyntaxOnly": true,
+    "verbatimModuleSyntax": true,
+    "noUnusedLocals": true,
+    "skipLibCheck": true
+  },
+  "include": ["**/*.ts", "../../types.ts"]
+}

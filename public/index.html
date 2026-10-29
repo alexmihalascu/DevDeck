@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Devdeck</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 16 16%22%3E%3Crect width=%2216%22 height=%2216%22 rx=%224%22 fill=%22%2310b981%22/%3E%3C/svg%3E">
+  <script>
+    try { const t = JSON.parse(localStorage.getItem('theme')); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch {}
+  </script>
+  <link rel="stylesheet" href="/vendor/geist-mono/index.css">
+  <link rel="stylesheet" href="/vendor/phosphor/regular/style.css">
+  <link rel="stylesheet" href="/vendor/phosphor/fill/style.css">
+  <link rel="stylesheet" href="/vendor/xterm/css/xterm.css">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <aside class="sidebar">
+    <header class="side-head">
+      <button class="brand" data-act="home" title="Dashboard">
+        <span class="brand-mark"><i class="ph-fill ph-stack"></i></span>Devdeck
+      </button>
+    </header>
+
+    <div class="side-search">
+      <i class="ph ph-magnifying-glass"></i>
+      <button class="kbd" data-act="palette" title="Command palette">Ctrl K</button>
+      <input id="search" type="search" placeholder="Search projects" aria-label="Search projects" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="side-scroll">
+      <section class="side-section" id="running-section">
+        <h2 class="side-label">Running <span id="running-count"></span></h2>
+        <div id="running"></div>
+      </section>
+      <section class="side-section">
+        <h2 class="side-label">Services
+          <button class="icon-btn sm" data-act="edit-service" title="Add service"><i class="ph ph-plus"></i></button>
+        </h2>
+        <div id="services"></div>
+      </section>
+      <section class="side-section">
+        <h2 class="side-label">Projects
+          <button class="icon-btn sm" data-act="toggle-hidden" title="Show hidden projects"><i class="ph ph-eye"></i></button>
+          <button class="icon-btn sm" data-act="rescan" title="Rescan folders"><i class="ph ph-arrow-clockwise"></i></button>
+        </h2>
+        <nav id="projects" aria-label="Projects"></nav>
+      </section>
+    </div>
+
+    <footer class="side-foot">
+      <button class="btn grow" data-act="import" data-kind="project"><i class="ph ph-download-simple"></i>Import project</button>
+      <button class="icon-btn" data-act="import" data-kind="root" title="Add workspace folder"><i class="ph ph-folder-plus"></i></button>
+      <button class="icon-btn" data-act="settings" title="Settings: network access, accounts, MFA"><i class="ph ph-gear-six"></i></button>
+      <button class="icon-btn" data-act="logout" id="logout-btn" title="Sign out" hidden><i class="ph ph-sign-out"></i></button>
+      <button class="icon-btn" data-act="notify" id="notify-btn" title="Windows notification when something crashes"><i class="ph ph-bell-slash"></i></button>
+      <button class="icon-btn" data-act="theme" id="theme-btn" title="Theme"><i class="ph ph-circle-half"></i></button>
+    </footer>
+  </aside>
+
+  <main class="main">
+    <header class="toolbar" id="toolbar"></header>
+    <div class="tabs" id="tabs" role="tablist"></div>
+    <section class="stage" id="stage">
+      <div class="page" id="page"></div>
+    </section>
+  </main>
+
+  <dialog id="import-dialog">
+    <form method="dialog" id="import-form">
+      <h2 id="import-title">Import project</h2>
+      <p class="muted" id="import-help"></p>
+      <label for="import-path">Folder</label>
+      <div class="path-row">
+        <input id="import-path" name="path" placeholder="C:\Users\you\Desktop\code\my-app" autocomplete="off" spellcheck="false" required>
+        <button class="btn host-only" type="button" data-act="browse"><i class="ph ph-folder-open"></i>Browse</button>
+      </div>
+      <input type="hidden" name="kind" id="import-kind">
+      <p class="form-error" id="import-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="btn" type="button" data-act="close-dialog">Cancel</button>
+        <button class="btn btn-primary" type="submit" value="ok">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="service-dialog">
+    <form id="service-form">
+      <h2 id="service-title">Add service</h2>
+      <p class="muted">Any long-running command. It runs in PowerShell, so <span class="mono">&amp; 'C:\path\app.exe' --flag</span> works.</p>
+      <input type="hidden" name="id">
+      <label for="svc-name">Name</label>
+      <input id="svc-name" name="name" class="field" placeholder="MySQL" required>
+      <label for="svc-cmd">Start command</label>
+      <input id="svc-cmd" name="cmd" class="field mono" placeholder="&amp; 'C:\xampp\mysql\bin\mysqld.exe' --standalone" required spellcheck="false">
+      <label for="svc-stop">Stop command <span class="muted">(optional, graceful shutdown; otherwise the process is killed)</span></label>
+      <input id="svc-stop" name="stopCmd" class="field mono" placeholder="&amp; 'C:\xampp\mysql\bin\mysqladmin.exe' -u root shutdown" spellcheck="false">
+      <div class="field-grid">
+        <div><label for="svc-cwd">Working folder</label><input id="svc-cwd" name="cwd" class="field mono" placeholder="C:\xampp\mysql" spellcheck="false"></div>
+        <div><label for="svc-port">Port</label><input id="svc-port" name="port" class="field mono" inputmode="numeric" placeholder="3306"></div>
+      </div>
+      <label for="svc-url">URL to open <span class="muted">(optional)</span></label>
+      <input id="svc-url" name="url" class="field mono" placeholder="http://localhost/phpmyadmin" spellcheck="false">
+      <label class="check"><input type="checkbox" name="autostart"> Start when Devdeck starts</label>
+      <label for="svc-logs">Log files <span class="muted">(one per line)</span></label>
+      <textarea id="svc-logs" name="logs" class="field mono" rows="3" placeholder="C:\xampp\mysql\data\mysql_error.log" spellcheck="false"></textarea>
+      <p class="form-error" id="service-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button class="btn" type="button" data-act="close-service">Cancel</button>
+        <button class="btn btn-primary" type="submit">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="log-dialog" class="wide">
+    <div class="log-head">
+      <div class="grow"><h2 id="log-title"></h2><div class="row-sub mono" id="log-path"></div></div>
+      <label class="follow"><input type="checkbox" id="log-follow" checked> Follow</label>
+      <button class="icon-btn" data-act="log-refresh" title="Refresh"><i class="ph ph-arrow-clockwise"></i></button>
+      <button class="icon-btn" data-act="close-log" title="Close"><i class="ph ph-x"></i></button>
+    </div>
+    <pre class="log-body" id="log-body"></pre>
+    <div class="log-meta muted" id="log-meta"></div>
+  </dialog>
+
+  <dialog id="settings" class="wide settings">
+    <div class="log-head">
+      <div class="grow"><h2>Settings</h2></div>
+      <button class="icon-btn" data-act="close-settings" title="Close"><i class="ph ph-x"></i></button>
+    </div>
+    <div class="settings-body" id="settings-body"></div>
+  </dialog>
+
+  <dialog id="palette" class="palette">
+    <input id="palette-input" placeholder="Run a script, open a project, start a service..." autocomplete="off" spellcheck="false" aria-label="Command">
+    <div id="palette-list" class="pal-list"></div>
+  </dialog>
+
+  <div class="offline" id="offline" hidden>Lost connection to the server. Reconnecting...</div>
+
+  <script src="/vendor/xterm/lib/xterm.js"></script>
+  <script src="/vendor/addon-fit/lib/addon-fit.js"></script>
+  <script src="/src/main.ts" type="module"></script>
+</body>
+</html>
