@@ -10,7 +10,7 @@ import { loadDb, loadRequirements } from './views/pages.ts';
 import {
   applyTheme, nextTheme, crashed, toggleNotify, renderNotify, openImport, openServiceDialog, openLog, loadLog, stopLogFollow,
   loadGit, gitSelect, gitRun, gitCommit, drawGit, loadEnv, saveEnv, drawEnv, openSettings, loadSettings, drawSettings,
-  openPalette, filterPalette, paletteKey, runPalette, ask, initAsk,
+  openPalette, filterPalette, paletteKey, runPalette, ask, initAsk, settingsGo, settingsSearchKey,
 } from './views/panels.ts';
 
 // ---------- live updates ----------
@@ -176,6 +176,18 @@ const actions: Record<string, Handler> = {
   'env-save': () => saveEnv(),
   // settings + accounts
   settings: () => openSettings(),
+  'settings-go': (b) => settingsGo(b.dataset.section as Parameters<typeof settingsGo>[0], b.dataset.row),
+  'set-theme': (b) => { applyTheme(b.dataset.theme as Parameters<typeof applyTheme>[0]); render(); drawSettings(); },
+  copy: async (b) => {
+    try { await navigator.clipboard.writeText(b.dataset.text!); toast('Copied.'); }
+    catch { toast('Copying needs localhost or https. Select the address and copy it by hand.', true); }
+  },
+  'session-revoke-others': async () => {
+    const others = state.settings.sessions.filter((x) => !x.current);
+    if (!await ask({ title: `Sign out ${others.length} other device${others.length > 1 ? 's' : ''}?`, text: 'They have to sign in again. This device stays signed in.', ok: 'Sign out', danger: true })) return;
+    for (const x of others) await api('POST', '/api/sessions/revoke', { id: x.id });
+    await loadSettings();
+  },
   'close-settings': () => $<HTMLDialogElement>('#settings').close(),
   logout: async () => { await api('POST', '/api/logout'); location.href = '/login.html'; },
   'autostart-toggle': async () => { await api('POST', '/api/autostart', { enabled: !state.me.autostart }); await loadSettings(); },
@@ -262,6 +274,8 @@ document.addEventListener('change', async (e) => {
 document.addEventListener('keydown', (e) => {
   if (e.ctrlKey && e.key === 'k') { e.preventDefault(); openPalette(); }
   if (e.key === 'Escape') document.body.classList.remove('nav-open');
+  // "/" jumps to the settings search.
+  if (e.key === '/' && $<HTMLDialogElement>('#settings').open && !(e.target as HTMLElement).matches('input, textarea')) { e.preventDefault(); $('#settings-search').focus(); }
   // Rows, tabs and cards that are divs act like buttons from the keyboard too.
   const el = e.target as HTMLElement;
   if ((e.key === 'Enter' || e.key === ' ') && el.matches?.('[data-act][tabindex]:not(button, a, input)')) { e.preventDefault(); el.click(); }
@@ -297,6 +311,8 @@ form('#service-form').addEventListener('submit', async (e) => {
 $('#log-dialog').addEventListener('close', stopLogFollow);
 initAsk();
 $('#palette-input').addEventListener('input', filterPalette);
+$('#settings-search').addEventListener('input', () => drawSettings());
+$('#settings-search').addEventListener('keydown', settingsSearchKey);
 $('#palette-input').addEventListener('keydown', paletteKey);
 $('#palette-list').addEventListener('click', (e) => {
   const el = (e.target as HTMLElement).closest<HTMLElement>('[data-index]');

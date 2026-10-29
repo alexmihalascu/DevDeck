@@ -52,9 +52,8 @@
     <footer class="side-foot">
       <button class="btn grow" data-act="import" data-kind="project"><i class="ph ph-download-simple"></i>Import project</button>
       <button class="icon-btn" data-act="import" data-kind="root" title="Add workspace folder"><i class="ph ph-folder-plus"></i></button>
-      <button class="icon-btn" data-act="settings" title="Settings: network access, accounts, MFA"><i class="ph ph-gear-six"></i></button>
+      <button class="icon-btn" data-act="settings" title="Settings"><i class="ph ph-gear-six"></i></button>
       <button class="icon-btn" data-act="logout" id="logout-btn" title="Sign out" hidden><i class="ph ph-sign-out"></i></button>
-      <button class="icon-btn" data-act="notify" id="notify-btn" title="Windows notification when something crashes"><i class="ph ph-bell-slash"></i></button>
       <button class="icon-btn" data-act="theme" id="theme-btn" title="Theme"><i class="ph ph-circle-half"></i></button>
     </footer>
   </aside>
@@ -126,12 +125,20 @@
     <div class="log-meta muted" id="log-meta"></div>
   </dialog>
 
-  <dialog id="settings" class="wide settings">
-    <div class="log-head">
-      <div class="grow"><h2>Settings</h2></div>
-      <button class="icon-btn" data-act="close-settings" title="Close"><i class="ph ph-x"></i></button>
+  <dialog id="settings" class="settings-modal" aria-label="Settings">
+    <nav class="set-nav" aria-label="Settings sections">
+      <label class="set-search"><i class="ph ph-magnifying-glass"></i>
+        <input id="settings-search" type="search" placeholder="Search" aria-label="Search settings" autocomplete="off" spellcheck="false">
+        <kbd>/</kbd></label>
+      <div id="settings-nav"></div>
+    </nav>
+    <div class="set-main">
+      <header class="set-head">
+        <div class="crumb" id="settings-crumb"></div>
+        <button class="icon-btn" data-act="close-settings" title="Close (Esc)"><i class="ph ph-x"></i></button>
+      </header>
+      <div class="set-scroll" id="settings-scroll"><div class="set-page" id="settings-body"></div></div>
     </div>
-    <div class="settings-body" id="settings-body"></div>
   </dialog>
 
   <dialog id="ask">

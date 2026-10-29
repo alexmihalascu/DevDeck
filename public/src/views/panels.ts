@@ -1,6 +1,6 @@
 // Interactive panels that own inputs (git, env, settings), dialogs, the command palette, theme and notifications.
 import type { GitFile, Project, Service, TermMeta } from '../../../types.ts';
-import { $, esc, ago, toast, store } from '../util.ts';
+import { $, esc, ago, toast, store, morph, hue } from '../util.ts';
 import { api, send } from '../net.ts';
 import { state, persist, SERVICES, projectOf, serviceState, emptyState, skeletonRows } from '../state.ts';
 import { render } from '../render.ts';
@@ -43,10 +43,9 @@ export async function toggleNotify() {
   renderNotify();
   toast(state.notify ? 'You get a Windows notification when something crashes.' : 'Crash notifications off.');
 }
+/** The switch lives in Settings; redraw it there if Settings is open. */
 export function renderNotify() {
-  $('#notify-btn').innerHTML = `<i class="ph ${state.notify ? 'ph-bell-ringing' : 'ph-bell-slash'}"></i>`;
-  $('#notify-btn').classList.toggle('on', state.notify);
-  $('#notify-btn').title = state.notify ? 'Crash notifications on' : 'Crash notifications off';
+  if ($<HTMLDialogElement>('#settings').open) drawSettings();
 }
 
 // ---------- ask: the app's own confirm / prompt ----------
@@ -298,10 +297,36 @@ export function drawEnv() {
   if (v.editing) $<HTMLTextAreaElement>('#env-text').value = v.text;
 }
 
-// ---------- settings ----------
-export async function openSettings() {
+// ---------- settings (section nav with search, grouped rows) ----------
+type SettingsSection = 'general' | 'network' | 'accounts' | 'devices';
+const SECTIONS: { id: SettingsSection; label: string; icon: string; group: string }[] = [
+  { id: 'general', label: 'General', icon: 'ph-sliders-horizontal', group: 'Devdeck' },
+  { id: 'network', label: 'Network', icon: 'ph-wifi-high', group: 'Devdeck' },
+  { id: 'accounts', label: 'Accounts', icon: 'ph-users', group: 'Security' },
+  { id: 'devices', label: 'Devices', icon: 'ph-devices', group: 'Security' },
+];
+/** Every searchable row. Titles and descriptions live here once; rows read them from here. */
+const ITEMS: { id: string; section: SettingsSection; title: string; desc: string; local?: boolean }[] = [
+  { id: 'theme', section: 'general', title: 'Theme', desc: 'Follow Windows, or stay light or dark.' },
+  { id: 'notify', section: 'general', title: 'Crash notifications', desc: 'A Windows notification when a script or service crashes while Devdeck is in the background.' },
+  { id: 'autostart', section: 'general', title: 'Start Devdeck with Windows', desc: 'Runs in the background after you sign in to Windows, no window. Projects and services set to auto-start come up with it.', local: true },
+  { id: 'shortcut', section: 'general', title: 'Desktop shortcut', desc: "Starts Devdeck if it isn't running and opens it in the browser.", local: true },
+  { id: 'urls', section: 'network', title: 'Addresses on your network', desc: 'Open one of these on another PC or phone and sign in.' },
+  { id: 'http', section: 'network', title: 'Plain HTTP', desc: 'Traffic is not encrypted, so use network access only on a network you trust.' },
+  { id: 'users', section: 'accounts', title: 'Accounts', desc: 'Who can sign in, their passwords, and who can be deleted.' },
+  { id: 'two-factor', section: 'accounts', title: 'Two-factor authentication', desc: '2FA / MFA: a 6-digit code from an authenticator app on every sign-in, on top of the password.' },
+  { id: 'new-user', section: 'accounts', title: 'Add an account', desc: 'A user name and a password of at least 8 characters.', local: true },
+  { id: 'reset', section: 'accounts', title: 'Locked out', desc: 'Lost your phone or password? Run npm run reset -- <user> <new password> in the Devdeck folder on this PC.', local: true },
+  { id: 'sessions', section: 'devices', title: 'Signed-in devices', desc: 'Every browser that is signed in. Signing one out ends its session right away.' },
+];
+const item = (id: string) => ITEMS.find((i) => i.id === id)!;
+
+export async function openSettings(section?: SettingsSection) {
   state.settings.mfa = null;
+  if (section) store.set('settingsSection', section);
+  input('#settings-search').value = '';
   $<HTMLDialogElement>('#settings').showModal();
+  drawSettings();
   await loadSettings();
 }
 export async function loadSettings() {
@@ -311,58 +336,113 @@ export async function loadSettings() {
   } catch (err) { state.settings.error = (err as Error).message; }
   drawSettings();
 }
+export function settingsGo(section: SettingsSection, rowId?: string) {
+  store.set('settingsSection', section);
+  // Account-wide entries point at the signed-in user's own row.
+  if (rowId === 'users' || rowId === 'two-factor') rowId = `user-${state.me.userId}`;
+  input('#settings-search').value = '';
+  drawSettings(true);
+  const row = rowId && document.querySelector<HTMLElement>(`#settings-body [data-row="${rowId}"]`);
+  if (row) {
+    row.scrollIntoView({ block: 'center', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth' });
+    row.classList.remove('pulse');
+    void row.offsetWidth;
+    row.classList.add('pulse');
+  }
+}
 const device = (a = '') => /Windows/.test(a) ? 'Windows' : /Android/.test(a) ? 'Android' : /iPhone|iPad/.test(a) ? 'iOS' : /Mac/.test(a) ? 'macOS' : /Linux/.test(a) ? 'Linux' : 'Browser';
 const browser = (a = '') => /Edg\//.test(a) ? 'Edge' : /Chrome\//.test(a) ? 'Chrome' : /Firefox\//.test(a) ? 'Firefox' : /Safari\//.test(a) ? 'Safari' : '';
-export function drawSettings() {
+const deviceIcon = (a = '') => /Android|iPhone|iPad/.test(a) ? 'ph-device-mobile' : 'ph-desktop';
+
+/** Row: title and description on the left, the control on the right (stacks on narrow screens). */
+const row = (id: string, control: string, extra: { title?: string; desc?: string; body?: string } = {}) => {
+  const i = ITEMS.find((x) => x.id === id);
+  const title = extra.title ?? esc(i?.title), desc = extra.desc ?? esc(i?.desc || '');
+  return `<div class="set-row" data-row="${esc(id)}">
+    <div class="set-text"><h3>${title}</h3>${desc ? `<p>${desc}</p>` : ''}</div>
+    <div class="set-ctl">${control}</div>${extra.body ? `<div class="set-body">${extra.body}</div>` : ''}</div>`;
+};
+const group = (title: string, rows: string, action = '') => rows.trim() ? `<section class="set-section">
+  <div class="set-section-head"><h2>${title}</h2>${action}</div><div class="set-group">${rows}</div></section>` : '';
+const switchCtl = (on: boolean, act: string, label: string) => `<button class="switch" role="switch" aria-checked="${on}" aria-label="${esc(label)}" data-act="${act}"></button>`;
+
+function settingsPage(section: SettingsSection): string {
   const { me, settings: s } = state;
-  const mfa = s.mfa;
-  $('#settings-body').innerHTML = `
-    ${s.error ? `<p class="form-error">${esc(s.error)}</p>` : ''}
-    ${me.local ? `<section><h3>Devdeck on this PC</h3><div class="list">
-      <div class="list-row"><i class="ph ph-power muted"></i>
-        <div class="grow"><div>Start Devdeck with Windows</div><div class="sub">Runs in the background after you log in, no window. Projects and services marked to auto-start come up with it.</div></div>
-        <button class="switch" role="switch" aria-checked="${!!me.autostart}" aria-label="Start Devdeck with Windows" data-act="autostart-toggle"></button></div>
-      <div class="list-row"><i class="ph ph-desktop muted"></i>
-        <div class="grow"><div>Desktop shortcut</div><div class="sub">Starts Devdeck if it isn't running and opens it in the browser.</div></div>
-        <button class="btn sm" data-act="shortcut">Create</button></div>
-    </div></section>` : ''}
-    <section><h3>Access from other PCs</h3>
-      <p class="muted">Open one of these on the other PC and sign in:</p>
-      <div class="url-list">${me.urls.map((u) => `<code>${esc(u)}</code>`).join('') || '<span class="muted">No network address found.</span>'}</div>
-      <p class="muted small">Traffic is plain HTTP, so use it only on a network you trust.</p>
-    </section>
-    ${mfa ? `<section class="mfa-setup"><h3>Two-factor for ${esc(mfa.name || me.user)}</h3>
-      <p class="muted">Scan with Google Authenticator, Microsoft Authenticator or 2FAS, then type the 6-digit code.</p>
-      <div class="mfa-grid"><div class="qr">${mfa.qr}</div>
-        <div><label class="muted small">Or enter this key</label><code class="secret">${esc(mfa.secret.replace(/(.{4})/g, '$1 ').trim())}</code>
+  if (section === 'general') {
+    const theme = store.get<string>('theme', 'system');
+    const opt = (t: string, icon: string, label: string) => `<button aria-pressed="${theme === t}" data-act="set-theme" data-theme="${t}"><i class="ph ${icon}"></i>${label}</button>`;
+    return group('Appearance', row('theme', `<div class="seg-ctl" role="group" aria-label="Theme">${opt('system', 'ph-monitor', 'System')}${opt('light', 'ph-sun', 'Light')}${opt('dark', 'ph-moon', 'Dark')}</div>`))
+      + group('Notifications', row('notify', switchCtl(state.notify, 'notify', 'Crash notifications')))
+      + (me.local ? group('This PC', row('autostart', switchCtl(!!me.autostart, 'autostart-toggle', 'Start Devdeck with Windows'))
+        + row('shortcut', '<button class="btn sm" data-act="shortcut"><i class="ph ph-desktop"></i>Create</button>')) : '');
+  }
+  if (section === 'network') {
+    const urls = me.urls || [];
+    return group('Access from other PCs', row('urls', '', { body: urls.length
+      ? `<div class="url-rows">${urls.map((u) => `<div class="url-row"><code>${esc(u)}</code><button class="icon-btn sm" data-act="copy" data-text="${esc(u)}" title="Copy address"><i class="ph ph-copy"></i></button></div>`).join('')}</div>`
+      : '<p class="muted small">No network address found. Is this PC on a network?</p>' })
+      + row('http', '', { title: `<i class="ph-fill ph-warning warn-ink"></i>${esc(item('http').title)}` }));
+  }
+  if (section === 'accounts') {
+    const mfa = s.mfa;
+    const users = s.users.map((u) => row(`user-${u.id}`, `
+      ${u.totp_enabled ? `<button class="btn sm" data-act="mfa-disable" data-uid="${u.id}" data-name="${esc(u.username)}">Turn off 2FA</button>`
+        : `<button class="btn sm" data-act="mfa-start" data-uid="${u.id}" data-name="${esc(u.username)}"><i class="ph ph-shield-check"></i>Set up 2FA</button>`}
+      <button class="btn sm" data-act="user-password" data-uid="${u.id}" data-name="${esc(u.username)}"><i class="ph ph-key"></i>Password</button>
+      ${me.local && u.id !== me.userId ? `<button class="icon-btn" data-act="user-delete" data-uid="${u.id}" data-name="${esc(u.username)}" title="Delete account"><i class="ph ph-trash"></i></button>` : ''}`, {
+      title: `<span class="set-avatar" style="--h:${hue(u.username)}">${esc(u.username[0]?.toUpperCase())}</span>${esc(u.username)}${u.id === me.userId ? ' <span class="tag">you</span>' : ''}
+        ${u.totp_enabled ? '<span class="tag ok"><i class="ph ph-shield-check"></i>2FA</span>' : '<span class="tag warn">no 2FA</span>'}`,
+      desc: `Last sign-in ${ago(u.last_login)}`,
+      body: mfa && mfa.uid === String(u.id) ? `<div class="mfa-setup">
+        <div class="qr">${mfa.qr}</div>
+        <div class="mfa-steps"><p>Scan the code with Google Authenticator, Microsoft Authenticator or 2FAS, then type the 6-digit code it shows.</p>
+          <label class="muted small">Or enter this key</label><code class="secret">${esc(mfa.secret.replace(/(.{4})/g, '$1 ').trim())}</code>
           <label class="muted small" for="mfa-code">Code</label>
-          <input id="mfa-code" class="field mono" inputmode="numeric" maxlength="6" autocomplete="one-time-code">
+          <input id="mfa-code" class="field mono" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="123456">
           <div class="row-actions"><button class="btn sm" data-act="mfa-cancel">Cancel</button><button class="btn sm btn-primary" data-act="mfa-confirm">Turn on</button></div>
-        </div></div></section>` : ''}
-    <section><h3>${me.local ? 'Accounts' : 'Your account'}</h3>
-      <div class="list">${s.users.map((u) => `
-        <div class="list-row"><i class="ph ph-user-circle muted"></i>
-          <div class="grow"><div>${esc(u.username)}${u.id === me.userId ? ' <span class="tag">you</span>' : ''}</div><div class="sub">last sign-in ${ago(u.last_login)}</div></div>
-          ${u.totp_enabled ? `<span class="tag ok"><i class="ph ph-shield-check"></i>MFA on</span><button class="btn sm" data-act="mfa-disable" data-uid="${u.id}" data-name="${esc(u.username)}">Turn off</button>`
-            : `<span class="tag warn">no MFA</span><button class="btn sm" data-act="mfa-start" data-uid="${u.id}" data-name="${esc(u.username)}"><i class="ph ph-shield-check"></i>Set up MFA</button>`}
-          <button class="btn sm" data-act="user-password" data-uid="${u.id}" data-name="${esc(u.username)}">Password</button>
-          ${me.local && u.id !== me.userId ? `<button class="icon-btn" data-act="user-delete" data-uid="${u.id}" data-name="${esc(u.username)}" title="Delete account"><i class="ph ph-trash"></i></button>` : ''}
-        </div>`).join('')}</div>
-      ${me.local ? `<p class="muted small">Lost your phone or password? On this PC run <code>npm run reset -- &lt;user&gt; &lt;new password&gt;</code> in the Devdeck folder.</p>
-      <form id="user-form" class="user-form" onsubmit="return false">
-        <input name="username" class="field" placeholder="New user" autocomplete="off">
-        <input name="password" class="field" type="password" placeholder="Password (min. 8)" autocomplete="new-password">
-        <button class="btn btn-primary" data-act="user-create"><i class="ph ph-plus"></i>Add</button>
-      </form>` : ''}
-    </section>
-    <section><h3>Signed-in devices</h3>
-      <div class="list">${s.sessions.map((x) => `
-        <div class="list-row"><i class="ph ph-desktop muted"></i>
-          <div class="grow"><div>${device(x.agent || '')} ${browser(x.agent || '')}${x.username ? ` <span class="muted">(${esc(x.username)})</span>` : ''}${x.current ? ' <span class="tag ok">this device</span>' : ''}</div>
-            <div class="sub mono">${esc(x.ip?.replace('::ffff:', '') || '')}, active ${ago(x.last_seen)}</div></div>
-          <button class="btn sm" data-act="session-revoke" data-sid="${esc(x.id)}" ${x.current ? 'data-current="1"' : ''}>Sign out</button>
-        </div>`).join('') || '<div class="list-row muted">No devices signed in.</div>'}</div>
-    </section>`;
+        </div></div>` : '',
+    })).join('');
+    return group(me.local ? 'Accounts' : 'Your account', users)
+      + (me.local ? group('New account', row('new-user', '', { body: `<form id="user-form" class="user-form" onsubmit="return false">
+          <input name="username" class="field" placeholder="User name" autocomplete="off" aria-label="User name">
+          <input name="password" class="field" type="password" placeholder="Password" autocomplete="new-password" aria-label="Password">
+          <button class="btn btn-primary" data-act="user-create"><i class="ph ph-user-plus"></i>Add</button></form>` })
+        + row('reset', '', { desc: 'Lost your phone or password? On this PC run <code>npm run reset -- &lt;user&gt; &lt;new password&gt;</code> in the Devdeck folder.' })) : '');
+  }
+  const others = s.sessions.filter((x) => !x.current).length;
+  return group('Signed-in devices', s.sessions.map((x) => row(`session-${x.id}`,
+    `<button class="btn sm" data-act="session-revoke" data-sid="${esc(x.id)}" ${x.current ? 'data-current="1"' : ''}><i class="ph ph-sign-out"></i>Sign out</button>`, {
+    title: `<i class="ph ${deviceIcon(x.agent || '')} muted"></i>${esc(device(x.agent || ''))} ${esc(browser(x.agent || ''))}${x.username ? ` <span class="muted">${esc(x.username)}</span>` : ''}${x.current ? ' <span class="tag ok">this device</span>' : ''}`,
+    desc: `<span class="mono">${esc(x.ip?.replace('::ffff:', '') || '')}</span>, active ${ago(x.last_seen)}`,
+  })).join('') || row('sessions', '', { desc: 'No devices signed in.' }),
+  others ? `<button class="btn sm" data-act="session-revoke-others"><i class="ph ph-sign-out"></i>Sign out ${others} other${others > 1 ? 's' : ''}</button>` : '');
+}
+
+/** Redraws nav, breadcrumb and page in place (morph), so typing in the search or a form survives a reload. */
+export function drawSettings(scrollTop = false) {
+  const { me, settings: s } = state;
+  const saved = store.get<string>('settingsSection', 'general');
+  const section: SettingsSection = SECTIONS.find((x) => x.id === saved)?.id ?? 'general';
+  const q = input('#settings-search').value.trim().toLowerCase();
+  const visible = ITEMS.filter((i) => !i.local || me.local);
+  // Every typed word has to start a word of the row ("two" finds two-factor, not neTWOrk); title hits first.
+  const words = q.split(/\s+/).filter(Boolean);
+  const starts = (text: string) => { const t = text.toLowerCase().split(/[^a-z0-9]+/); return words.every((w) => t.some((x) => x.startsWith(w))); };
+  const hits = q ? [...visible.filter((i) => starts(i.title)), ...visible.filter((i) => !starts(i.title) && starts(`${i.title} ${i.desc} ${i.section}`))] : [];
+  morph($('#settings-nav'), q
+    ? hits.map((i, n) => `<button class="set-item result${n === 0 ? ' active' : ''}" data-act="settings-go" data-section="${i.section}" data-row="${i.id}">
+        <i class="ph ${SECTIONS.find((x) => x.id === i.section)!.icon}"></i><span><b>${esc(i.title)}</b><small>${esc(SECTIONS.find((x) => x.id === i.section)!.label)}</small></span></button>`).join('')
+      || '<p class="set-none">No settings found</p>'
+    : [...new Set(SECTIONS.map((x) => x.group))].map((g) => `<div class="set-nav-group"><h4>${g}</h4>
+        ${SECTIONS.filter((x) => x.group === g).map((x) => `<button class="set-item${x.id === section ? ' active' : ''}" data-act="settings-go" data-section="${x.id}" ${x.id === section ? 'aria-current="page"' : ''}>
+          <i class="ph ${x.icon}"></i><span>${x.label}</span></button>`).join('')}</div>`).join(''));
+  morph($('#settings-crumb'), `<span class="muted">Settings</span><i class="ph ph-caret-right faint"></i><span>${SECTIONS.find((x) => x.id === section)!.label}</span>`);
+  morph($('#settings-body'), `${s.error ? `<p class="form-error">${esc(s.error)}</p>` : ''}${settingsPage(section)}`);
+  if (scrollTop) $('#settings-scroll').scrollTop = 0;
+}
+export function settingsSearchKey(e: KeyboardEvent) {
+  if (e.key === 'Enter') { e.preventDefault(); document.querySelector<HTMLElement>('#settings-nav .result')?.click(); }
+  if (e.key === 'Escape' && input('#settings-search').value) { e.preventDefault(); input('#settings-search').value = ''; drawSettings(); }
 }
 
 // ---------- command palette ----------
@@ -384,6 +464,9 @@ function paletteSource(): PalItem[] {
   items.push({ icon: 'ph-database', label: 'Databases and backups', hint: 'Services', run: go(SERVICES, 'overview') });
   items.push({ icon: 'ph-download-simple', label: 'Import project', hint: 'Folder picker', run: () => openImport('project') });
   items.push({ icon: 'ph-circle-half', label: 'Toggle theme', hint: '', run: nextTheme });
+  items.push({ icon: 'ph-gear-six', label: 'Settings', hint: 'Theme, network, accounts', run: () => openSettings() });
+  items.push({ icon: 'ph-users', label: 'Accounts and two-factor', hint: 'Settings', run: () => openSettings('accounts') });
+  items.push({ icon: 'ph-wifi-high', label: 'Open from another PC', hint: 'Settings', run: () => openSettings('network') });
   return items;
 }
 export function openPalette() {
