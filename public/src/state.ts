@@ -7,6 +7,10 @@ import { esc, fmtDur, fmtMem, fmtPct, hue, store } from './util.ts';
 
 export const SERVICES = '__services';
 export type Page = 'overview' | 'git' | 'env';
+export const PROJECT_FILTERS = ['all', 'running', 'stopped', 'error'] as const;
+export type ProjectFilter = (typeof PROJECT_FILTERS)[number];
+const savedFavorites = store.get<unknown>('favorite-projects', []);
+const savedFilter = store.get<ProjectFilter>('project-filter', 'all');
 export type XTerm = InstanceType<typeof Terminal>;
 export type Fit = InstanceType<typeof FitAddon.FitAddon>;
 export interface TermView { meta: TermMeta & { sized?: boolean }; term: XTerm; fit: Fit; el: HTMLElement }
@@ -30,13 +34,15 @@ export interface EnvView { projectId: string; file: string; text: string; reveal
 export interface DbList { databases: DbInfo[] | null; backups: BackupFile[]; error: string | null; schedule?: BackupSchedule }
 
 export const state = {
-  config: { roots: [], manual: [], projects: [], services: [], mysql: { user: 'root', hasPassword: false } } as PublicConfig,
+  config: { roots: [], manual: [], excluded: [], projects: [], services: [], mysql: { user: 'root', hasPassword: false } } as PublicConfig,
   terms: new Map<string, TermView>(),
   selected: store.get<string | null>('selected', null), // project id, null = dashboard
   active: store.get<Record<string, string>>('active', {}), // projectId -> page or termId
   view: store.get<'tabs' | 'grid'>('view', 'tabs'),
   query: '',
   showHidden: false,
+  favorites: new Set<string>(Array.isArray(savedFavorites) ? savedFavorites.filter((id): id is string => typeof id === 'string') : []),
+  projectFilter: PROJECT_FILTERS.includes(savedFilter) ? savedFilter : 'all' as ProjectFilter,
   pendingFocus: null as string | null,
   health: {} as Health,
   git: {} as Record<string, GitSummary>,
@@ -60,6 +66,8 @@ export function persist() {
   store.set('selected', state.selected);
   store.set('active', state.active);
   store.set('view', state.view);
+  store.set('favorite-projects', [...state.favorites]);
+  store.set('project-filter', state.projectFilter);
 }
 
 // ---------- selectors ----------
@@ -67,25 +75,45 @@ export const termsOf = (pred: (m: TermMeta) => boolean) => [...state.terms.value
 export const termFor = (appId: string, script: string) => [...state.terms.values()].find((t) => t.meta.appId === appId && t.meta.script === script);
 export const statusOf = (metas: TermMeta[]): '' | 'running' | 'error' => {
   if (metas.some((m) => m.status === 'running')) return 'running';
-  if (metas.some((m) => m.status === 'exited' && m.code !== 0 && !m.killed)) return 'error';
+  if (metas.some((m) => m.status === 'exited' && m.code != null && m.code !== 0 && !m.killed)) return 'error';
   return '';
 };
 const SERVICES_PROJECT: Project = { id: SERVICES, name: 'Services', path: '', apps: [], branch: null, icon: null, envFiles: [], db: null };
 export const projectOf = (id: string | null | undefined) => id === SERVICES ? SERVICES_PROJECT : state.config.projects.find((p) => p.id === id);
 export const portOwner = (port: number | null | undefined) => (port && state.health[port]) || null;
 export const serviceTerm = (svc: Service) => termsOf((m) => m.serviceId === svc.id)[0];
-/** running = started here; external = its port answers but Devdeck did not start it; error = crashed. */
-export const serviceState = (svc: Service): '' | 'running' | 'external' | 'error' => {
+/** busy = its port is taken by a different program; running = started here; external = its port answers but Devdeck did not start it; error = crashed. */
+export const serviceState = (svc: Service): '' | 'running' | 'external' | 'busy' | 'error' => {
   const m = serviceTerm(svc);
+  const o = svc.port && state.health[svc.port];
+  if (o && o.foreign) return 'busy';
   if (m?.status === 'running') return 'running';
-  if (svc.port && state.health[svc.port]) return 'external';
+  if (o) return o.foreign ? 'busy' : 'external';
   return statusOf(m ? [m] : []);
 };
 export const visibleProjects = () => {
   const q = state.query.trim().toLowerCase();
   return state.config.projects.filter((p) => (state.showHidden || !p.hidden || p.id === state.selected)
-    && (!q || p.name.toLowerCase().includes(q) || p.apps.some((a) => a.stack?.some((s) => s.includes(q)))));
+    && (!q || p.name.toLowerCase().includes(q) || p.apps.some((a) => a.stack?.some((s) => s.toLowerCase().includes(q))))
+    && (state.projectFilter === 'all' || (statusOf(termsOf((m) => m.projectId === p.id)) || 'stopped') === state.projectFilter))
+    .sort((a, b) => Number(state.favorites.has(b.id)) - Number(state.favorites.has(a.id)));
 };
+export function toggleFavorite(projectId: string) {
+  if (!state.config.projects.some((p) => p.id === projectId)) return;
+  if (state.favorites.has(projectId)) state.favorites.delete(projectId); else state.favorites.add(projectId);
+  persist();
+}
+
+/** Open host-local service URLs on the machine hosting Devdeck, including from a LAN client. */
+export function serviceUrl(svc: Service, base: string): string | null {
+  if (!svc.url) return null;
+  try {
+    const url = new URL(svc.url, base);
+    if (!['http:', 'https:'].includes(url.protocol)) return null;
+    if (['localhost', '127.0.0.1', '0.0.0.0', '[::1]'].includes(url.hostname)) url.hostname = new URL(base).hostname;
+    return url.href;
+  } catch { return null; }
+}
 export const projectSub = (p: Project) => p.apps.length > 1 || p.apps[0]?.name !== p.name
   ? p.apps.map((a) => a.name).join(', ')
   : (p.apps[0]?.stack || []).slice(0, 3).join(', ') || p.apps[0]?.pm || '';

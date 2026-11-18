@@ -11,11 +11,13 @@ const fail = (message: string, status = 400) => Object.assign(new Error(message)
 export const findExe = (name: string): string | null => (process.env.PATH || '').split(path.delimiter)
   .map((d) => path.join(d.replace(/"/g, ''), process.platform === 'win32' ? `${name}.exe` : name))
   .find((f) => path.isAbsolute(f) && fs.existsSync(f)) || null;
-const GIT = findExe('git') || 'git';
+const GIT = findExe('git');
 
 // Every git call goes through execFile (no shell), so paths and messages are never parsed as commands.
 const git = (cwd: string, args: string[], { allowFail = false } = {}) => new Promise<string>((resolve, reject) => {
-  execFile(GIT, ['-c', 'core.quotepath=false', '-c', 'color.ui=false', ...args],
+  // Falling back to a bare name would search the project's cwd on Windows.
+  if (!GIT) return reject(fail('Git executable not found on PATH.', 404));
+  execFile(GIT, ['--literal-pathspecs', '-c', 'core.quotepath=false', '-c', 'color.ui=false', ...args],
     { cwd, maxBuffer: 32 * 1024 * 1024, windowsHide: true, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } },
     (err, stdout, stderr) => {
       if (err && !allowFail) return reject(fail((stderr || err.message).trim()));
@@ -29,18 +31,18 @@ export const isRepo = (dir: string) => fs.existsSync(path.join(dir, '.git'));
 export function parseStatus(out: string): GitStatus {
   const parts = out.split('\0');
   const head = parts[0].startsWith('## ') ? (parts.shift() as string).slice(3) : '';
-  const m = head.match(/^(?:No commits yet on )?([^.\s]+)(?:\.\.\.(\S+))?(?: \[(.*)\])?/) || [];
+  const m = head.match(/^(?:No commits yet on |Initial commit on )?(.+?)(?:\.\.\.(\S+))?(?: \[(.*)\])?$/) || [];
   const files: GitFile[] = [];
   for (let i = 0; i < parts.length; i++) {
     const e = parts[i];
     if (e.length < 4) continue;
     const x = e[0], y = e[1];
     const f: GitFile = { path: e.slice(3), x, y, staged: x !== ' ' && x !== '?', untracked: x === '?' };
-    if (x === 'R' || x === 'C') f.from = parts[++i];
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') f.from = parts[++i];
     files.push(f);
   }
   return {
-    branch: m[1] || null, upstream: m[2] || null,
+    branch: head === 'HEAD (no branch)' ? null : m[1] || null, upstream: m[2] || null,
     ahead: Number(m[3]?.match(/ahead (\d+)/)?.[1] || 0),
     behind: Number(m[3]?.match(/behind (\d+)/)?.[1] || 0),
     files,
@@ -74,13 +76,23 @@ export const show = (dir: string, hash: string) => {
 
 export async function commit(dir: string, message: string, files: string[]) {
   if (!String(message || '').trim()) throw fail('Write a commit message first.');
-  await git(dir, files.length ? ['add', '-A', '--', ...files] : ['add', '-A']);
-  return git(dir, ['commit', '-m', message]);
+  if (!files.length) throw fail('Select at least one file.');
+  const changed = new Map((await status(dir)).files.map((f) => [f.path, f]));
+  const selected = [...new Set(files)].map((file) => {
+    const entry = changed.get(file);
+    if (!entry) throw fail('A selected file is no longer changed. Refresh.');
+    return entry;
+  });
+  // A rename must remove its old path in the same commit. Unselected staged
+  // changes stay in the index and are excluded by --only.
+  const paths = [...new Set(selected.flatMap((f) => f.from && (f.x === 'R' || f.y === 'R') ? [f.path, f.from] : [f.path]))];
+  await git(dir, ['add', '-A', '--', ...selected.map((f) => f.path)]);
+  return git(dir, ['commit', '--only', '-m', message, '--', ...paths]);
 }
 
 const REMOTE = { fetch: ['fetch', '--prune'], pull: ['pull', '--ff-only'], push: ['push'] } as const;
 export const remote = (dir: string, action: string) => {
-  if (!(action in REMOTE)) throw fail('Unknown action');
+  if (!Object.hasOwn(REMOTE, action)) throw fail('Unknown action');
   return git(dir, [...REMOTE[action as keyof typeof REMOTE]]).then((out) => out || `${action}: done`);
 };
 

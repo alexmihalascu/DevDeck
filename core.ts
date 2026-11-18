@@ -7,7 +7,8 @@ import { scanAll, merge } from './scan.ts';
 import type { App, Config, Project, PublicConfig, ServerMsg, Service } from './types.ts';
 
 export const ROOT = import.meta.dirname;
-export const DATA = path.join(ROOT, 'data');
+// A separate data directory allows tests and previews without touching personal accounts/config.
+export const DATA = path.resolve(process.env.DEVDECK_DATA_DIR || path.join(ROOT, 'data'));
 export const PORT = Number(process.env.PORT) || 4321;
 // Listens on the network, but nothing past the login gate answers until you sign in.
 export const HOST = process.env.HOST || '0.0.0.0';
@@ -30,8 +31,9 @@ export const psQuote = (s: string) => `'${s.replaceAll("'", "''")}'`;
 
 // ---------- config ----------
 const CONFIG_FILE = path.join(DATA, 'config.json');
-export const config: Config = { roots: [], manual: [], projects: [], services: [], mysql: { user: 'root', password: '' } };
+export const config: Config = { roots: [], manual: [], excluded: [], projects: [], services: [], mysql: { user: 'root', password: '' } };
 try { Object.assign(config, JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))); } catch {}
+config.excluded ||= [];
 export const save = () => {
   fs.mkdirSync(DATA, { recursive: true });
   fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));

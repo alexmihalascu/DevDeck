@@ -5,9 +5,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, spawn } from 'node:child_process';
 import { stripTypeScriptTypes } from 'node:module';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, type WebSocket } from 'ws';
 import QRCode from 'qrcode';
-import { scanProject } from './scan.ts';
+import { scanProject, pathKey } from './scan.ts';
 import * as git from './git.ts';
 import { createDb } from './db.ts';
 import { createAuth, isLoopback, lanAddresses, type Session } from './auth.ts';
@@ -17,12 +17,20 @@ import {
   ROOT, DATA, PORT, HOST, POWERSHELL, CMD, EXPLORER, XAMPP, type HttpError,
 } from './core.ts';
 import {
-  terms, meta, handle, startAll, neededServices, startService, killAll, checkHealth, listeningPids, openWt,
+  terms, meta, handle, startAll, runningScripts, resumeScripts, neededServices, startService, killAll, checkHealth, listeningPids, openWt,
   health, stats, machine, statsHistory, docker, dockerLogs, refreshDocker,
 } from './processes.ts';
 import type { ClientMsg, GitSummary, Project } from './types.ts';
 
-for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(sig, () => { killAll(); process.exit(0); });
+// What was running, kept on disk so a restart can bring it back. Snapshot before killAll marks everything as stopped.
+let resumeStarted = false; // don't wipe the saved list before the boot-time resume had a chance to run
+function snapshotRunning() {
+  if (!config.resumeRunning || !resumeStarted) return;
+  const now = runningScripts();
+  if (JSON.stringify(now) !== JSON.stringify(config.resume || [])) { config.resume = now; save(); }
+}
+setInterval(snapshotRunning, 10_000);
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP'] as const) process.on(sig, () => { snapshotRunning(); killAll(); process.exit(0); });
 
 // ---------- request helpers ----------
 type Body = Record<string, unknown>;
@@ -34,9 +42,24 @@ const send = (res: ServerResponse, code: number, body: unknown) => {
   res.end(typeof body === 'string' ? body : JSON.stringify(body));
 };
 const readBody = (req: IncomingMessage) => new Promise<Body>((resolve, reject) => {
-  let s = '';
-  req.on('data', (c: Buffer) => { s += c; if (s.length > 1e6) req.destroy(); });
-  req.on('end', () => { try { resolve(s ? JSON.parse(s) : {}); } catch (e) { reject(e); } });
+  const chunks: Buffer[] = [];
+  let bytes = 0, rejected = false;
+  req.on('data', (chunk: Buffer) => {
+    if (rejected) return;
+    bytes += chunk.length;
+    if (bytes > 1e6) { rejected = true; chunks.length = 0; reject(fail('Request body is too large', 413)); return; }
+    chunks.push(chunk);
+  });
+  req.on('end', () => {
+    if (rejected) return;
+    try {
+      const body: unknown = bytes ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {};
+      if (!body || typeof body !== 'object' || Array.isArray(body)) throw fail('Expected a JSON object');
+      resolve(body as Body);
+    } catch { reject(fail('Expected a valid JSON object')); }
+  });
+  req.on('error', reject);
+  req.on('aborted', () => reject(fail('Request aborted')));
 });
 const str = (v: unknown) => (typeof v === 'string' ? v : v == null ? '' : String(v));
 const redirect = (res: ServerResponse, to: string) => { res.writeHead(302, { location: to }); res.end(); };
@@ -46,7 +69,7 @@ const hostOk = (host = '') => {
   const i = host.lastIndexOf(':');
   if (i < 0 || host.slice(i + 1) !== String(PORT)) return false;
   const name = host.slice(0, i).toLowerCase();
-  return name === 'localhost' || name === '127.0.0.1' || name === os.hostname().toLowerCase() || lanAddresses().includes(name);
+  return name === 'localhost' || name === '127.0.0.1' || name === '[::1]' || name === os.hostname().toLowerCase() || lanAddresses().includes(name);
 };
 const sameOrigin = (req: IncomingMessage) => req.headers.origin === `http://${req.headers.host}`;
 
@@ -70,13 +93,15 @@ function serveStatic(res: ServerResponse, pathname: string) {
   const prefix = Object.keys(STATIC).find((k) => pathname.startsWith(k)) as string;
   const base = path.join(ROOT, STATIC[prefix]);
   const file = path.join(base, decodeURIComponent(pathname.slice(prefix.length)));
-  if (!file.startsWith(base)) return send(res, 403, 'forbidden');
+  const relative = path.relative(base, file);
+  if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return send(res, 403, 'forbidden');
   fs.readFile(file, (err, data) => {
     if (err) return send(res, 404, 'not found');
     const ext = path.extname(file);
     let body: Buffer | string = data;
     if (ext === '.ts') {
-      const mtime = fs.statSync(file).mtimeMs;
+      let mtime: number;
+      try { mtime = fs.statSync(file).mtimeMs; } catch { return send(res, 404, 'not found'); }
       const hit = tsCache.get(file);
       if (hit?.mtime === mtime) body = hit.js;
       else {
@@ -152,7 +177,7 @@ function setLoginAutostart(on: boolean) {
   else fs.rmSync(STARTUP_VBS, { force: true });
 }
 // An existing autostart entry from the .js days must point at server.ts now.
-if (loginAutostart() && fs.readFileSync(STARTUP_VBS, 'utf8').includes('server.js')) setLoginAutostart(true);
+if (process.env.DEVDECK_AUTOSTART !== '0' && loginAutostart() && fs.readFileSync(STARTUP_VBS, 'utf8').includes('server.js')) setLoginAutostart(true);
 function desktopShortcut() {
   writeLauncher(LAUNCHER, true);
   const ps = (s: string) => s.replaceAll("'", "''");
@@ -243,6 +268,27 @@ const api: Record<string, Route> = {
     return config;
   },
   'POST /api/scan': () => { rescan(); return config; },
+  // Remove = forget, never delete from disk. A scanned project goes to `excluded` so rescans don't bring it back.
+  'POST /api/projects/remove': async ({ id }) => {
+    const p = config.projects.find((x) => x.id === id);
+    if (!p) throw fail('Unknown project', 404);
+    await handle({ t: 'stopAll', projectId: p.id });
+    const key = pathKey(p.path);
+    const wasManual = config.manual.some((m) => pathKey(m) === key);
+    config.manual = config.manual.filter((m) => pathKey(m) !== key);
+    const underRoot = config.roots.some((r) => pathKey(path.dirname(p.path)) === pathKey(r));
+    if ((!wasManual || underRoot) && !config.excluded.some((e) => pathKey(e) === key)) config.excluded.push(p.path);
+    config.projects = config.projects.filter((x) => x !== p);
+    save();
+    return config;
+  },
+  'POST /api/projects/restore': ({ path: raw }) => {
+    const key = pathKey(str(raw));
+    if (!config.excluded.some((e) => pathKey(e) === key)) throw fail('Not an excluded project', 404);
+    config.excluded = config.excluded.filter((e) => pathKey(e) !== key);
+    rescan();
+    return config;
+  },
   'POST /api/folders': ({ path: raw, kind }) => {
     const dir = path.resolve(str(raw).trim().replace(/^"|"$/g, ''));
     if (!isDir(dir)) throw fail(`Folder not found: ${dir}`);
@@ -339,6 +385,16 @@ const api: Record<string, Route> = {
     const databases = listening[3306] ? await db.databases().then((d) => d.map((x) => x.name), () => null) : null;
     return checkProject(p, { listening, databases, services: config.services, needed: neededServices(p) });
   },
+  'POST /api/requirements/skip': ({ projectId, reqId, skip }) => {
+    const p = config.projects.find((x) => x.id === projectId);
+    if (!p) throw fail('Unknown project', 404);
+    const id = str(reqId);
+    if (!id || id.length > 1000) throw fail('Invalid reqId');
+    const rest = (p.skippedReqs || []).filter((x) => x !== id);
+    p.skippedReqs = skip === true ? [...rest, id] : rest;
+    save();
+    return { skippedReqs: p.skippedReqs };
+  },
   'POST /api/requirements/fix': async ({ projectId, kind, arg }) => {
     const p = config.projects.find((x) => x.id === projectId);
     if (!p) throw fail('Unknown project', 404);
@@ -377,8 +433,10 @@ const api: Record<string, Route> = {
   'POST /api/git/commit': async ({ projectId, message, files }) => {
     const dir = repoOf(projectId);
     const changed = new Set((await git.status(dir)).files.map((f) => f.path));
-    const pick = Array.isArray(files) ? files.filter((f): f is string => typeof f === 'string' && changed.has(f)) : [];
-    const out = await git.commit(dir, str(message), pick);
+    if (!Array.isArray(files) || !files.length || !files.every((f): f is string => typeof f === 'string' && changed.has(f))) {
+      throw fail('Select changed files to commit. Refresh if the selection is stale.');
+    }
+    const out = await git.commit(dir, str(message), files);
     refreshGit();
     return { output: out };
   },
@@ -387,7 +445,8 @@ const api: Record<string, Route> = {
     let note = '';
     const proj = config.projects.find((x) => x.id === projectId);
     if (action === 'pull' && proj?.db && config.backup?.beforePull !== false) {
-      try { note = `DB backup: ${(await db.backup(proj.db, '-pre-pull')).file}\n`; } catch {}
+      try { note = `DB backup: ${(await db.backup(proj.db, '-pre-pull')).file}\n`; }
+      catch (e) { note = `DB backup skipped (${(e as Error).message}); pull continues without it\n`; }
     }
     const out = note + await git.remote(repoOf(projectId), str(action));
     refreshGit();
@@ -419,19 +478,26 @@ const api: Record<string, Route> = {
   'POST /api/sessions/revoke': ({ id }, { local, session }) => { auth.revoke(str(id), local ? null : (session as Session).userId); return { ok: true }; },
 
   // host PC
-  'POST /api/autostart': ({ enabled }) => { setLoginAutostart(!!enabled); return { enabled: loginAutostart() }; },
+  'POST /api/resume': ({ enabled }) => {
+    config.resumeRunning = !!enabled;
+    config.resume = config.resumeRunning ? runningScripts() : [];
+    save();
+    return publicConfig();
+  },
+  'POST /api/autostart':({ enabled }) => { setLoginAutostart(!!enabled); return { enabled: loginAutostart() }; },
   'POST /api/shortcut': async () => ({ path: await desktopShortcut() }),
 };
 
 // Things that act on the host PC's desktop (or manage other people's accounts) are refused from another machine.
 const LOCAL_ONLY = new Set(['POST /api/pick-folder', 'POST /api/open', 'POST /api/open-wt', 'POST /api/db/open-folder',
-  'POST /api/autostart', 'POST /api/shortcut', 'POST /api/users/create', 'POST /api/users/delete']);
+  'POST /api/autostart', 'POST /api/resume', 'POST /api/shortcut', 'POST /api/users/create', 'POST /api/users/delete']);
 const PUBLIC = new Set(['/login.html', '/style.css']);
 const isPublic = (req: IncomingMessage, pathname: string) => req.method === 'GET' && (PUBLIC.has(pathname) || pathname.startsWith('/vendor/'));
 
 // phpMyAdmin through Devdeck: Apache sees a local request (XAMPP allows it only from localhost) and Devdeck's login already ran.
 function proxyPma(req: IncomingMessage, res: ServerResponse) {
   const port = config.services.find((s) => s.id === 'xampp-apache')?.port || 80;
+  if (health[port] && health[port].foreign) return send(res, 502, `Port ${port} is used by ${health[port].name} (PID ${health[port].pid}), not Apache. Stop it or change Apache's port.`);
   const cookie = (req.headers.cookie || '').split(';').filter((c) => !c.trim().startsWith('dd_session=')).join(';');
   const headers = { ...req.headers, host: port === 80 ? 'localhost' : `localhost:${port}`, cookie };
   delete headers.origin;
@@ -460,7 +526,9 @@ async function onRequest(req: IncomingMessage, res: ServerResponse) {
   if (req.method === 'GET' && pathname === '/api/setup-state') return send(res, 200, { setup, local, hasUsers: auth.hasUsers() });
   if (req.method === 'POST' && pathname === '/api/setup') {
     if (!setup) return send(res, 403, { error: 'Setup is already done.' });
-    const body = await readBody(req).catch((): Body => ({}));
+    const body = await readBody(req);
+    // Another setup request may have completed while this one's body was arriving.
+    if (auth.hasUsers()) return send(res, 403, { error: 'Setup is already done.' });
     try { auth.createUser(body.user, body.password); } catch (e) { return send(res, (e as HttpError).status || 400, { error: (e as Error).message }); }
     const r = auth.login(ip, body.user, body.password, req.headers['user-agent']);
     if ('token' in r) res.setHeader('set-cookie', auth.cookie(r.token));
@@ -468,7 +536,7 @@ async function onRequest(req: IncomingMessage, res: ServerResponse) {
   }
   if (req.method === 'POST' && (pathname === '/api/login' || pathname === '/api/login/mfa')) {
     if (!auth.hasUsers()) return send(res, 403, { error: local ? 'Create your account first.' : 'Network access is off. Create an account on the host PC first.' });
-    const body = await readBody(req).catch((): Body => ({}));
+    const body = await readBody(req);
     const agent = req.headers['user-agent'];
     const r = pathname === '/api/login' ? auth.login(ip, body.user, body.password, agent) : auth.loginMfa(ip, body.ticket, body.code, agent);
     if ('error' in r) return send(res, r.status, { error: r.error });
@@ -485,6 +553,7 @@ async function onRequest(req: IncomingMessage, res: ServerResponse) {
   if (pathname === '/phpmyadmin' || pathname.startsWith('/phpmyadmin/')) return proxyPma(req, res);
   if (req.method === 'POST' && pathname === '/api/logout') {
     auth.logout(session.tokenHash);
+    disconnectRevokedSessions();
     res.setHeader('set-cookie', auth.cookie('', 0));
     return send(res, 200, { ok: true });
   }
@@ -502,28 +571,44 @@ async function onRequest(req: IncomingMessage, res: ServerResponse) {
   if (!route) return req.method === 'GET' ? serveStatic(res, pathname) : send(res, 404, 'not found');
   try {
     const out = await route(req.method === 'GET' ? {} : await readBody(req), { local, session });
+    disconnectRevokedSessions();
     send(res, 200, out === config ? publicConfig() : out);
   } catch (e) {
     send(res, (e as HttpError).status || 500, { error: (e as Error).message });
   }
 }
 
-const server = http.createServer((req, res) => { onRequest(req, res).catch((e) => { if (!res.headersSent) send(res, 500, { error: (e as Error).message }); }); });
+const server = http.createServer((req, res) => { onRequest(req, res).catch((e) => { if (!res.headersSent) send(res, (e as HttpError).status || 500, { error: (e as Error).message }); }); });
 
-const wss = new WebSocketServer({ noServer: true });
+const socketSessions = new Map<WebSocket, IncomingMessage>();
+function disconnectRevokedSessions() {
+  for (const [ws, req] of socketSessions) {
+    if (auth.session(req)) continue;
+    clients.delete(ws);
+    socketSessions.delete(ws);
+    ws.close(1008, 'Session expired');
+  }
+}
+setInterval(disconnectRevokedSessions, 30_000).unref();
+const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20 });
 server.on('upgrade', (req, socket, head) => {
   if (!hostOk(req.headers.host) || !sameOrigin(req) || !auth.session(req)) return socket.destroy();
-  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws));
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
 });
-wss.on('connection', (ws) => {
+wss.on('connection', (ws, req) => {
   clients.add(ws);
+  socketSessions.set(ws, req);
   ws.send(JSON.stringify({ t: 'init', health, git: gitSummary, docker, stats, machine, terms: [...terms.values()].map((r) => ({ ...meta(r), buf: r.buf })) }));
   ws.on('message', (raw) => {
+    if (!auth.session(req)) { disconnectRevokedSessions(); return; }
     let msg: ClientMsg;
     try { msg = JSON.parse(String(raw)); } catch { return; }
-    if (msg && typeof msg.t === 'string') handle(msg);
+    if (msg && typeof msg.t === 'string') void handle(msg, (message) => {
+      if (ws.readyState === ws.OPEN) ws.send(JSON.stringify({ t: 'error', message }));
+    });
   });
-  ws.on('close', () => clients.delete(ws));
+  ws.on('error', () => ws.terminate());
+  ws.on('close', () => { clients.delete(ws); socketSessions.delete(ws); });
 });
 
 // ---------- startup ----------
@@ -535,10 +620,11 @@ if (apacheSvc && apacheSvc.name !== 'phpMyAdmin') { Object.assign(apacheSvc, { n
 const mysqlSvc = config.services.find((s) => s.id === 'xampp-mysql');
 if (mysqlSvc?.url?.startsWith('http://localhost/phpmyadmin')) { mysqlSvc.url = '/phpmyadmin/'; save(); }
 // Services and projects marked to start with Devdeck (skip a service whose port is already taken).
-listeningPids().then((pids) => {
+if (process.env.DEVDECK_AUTOSTART !== '0') listeningPids().then((pids) => {
   for (const s of config.services) if (s.autostart && !(s.port && pids[s.port])) startService(s.id);
-  for (const p of config.projects) if (p.bootStart) startAll(p.id);
-});
+  for (const p of config.projects) if (p.bootStart) startAll(p.id).catch((e) => console.error(`bootStart ${p.name}:`, e));
+  return config.resumeRunning && config.resume?.length ? resumeScripts(config.resume) : undefined;
+}).catch((e) => console.error('autostart:', e)).finally(() => { resumeStarted = true; });
 refreshGit();
 refreshDocker();
 

@@ -8,6 +8,7 @@
     "dev": "node --disable-warning=ExperimentalWarning --watch server.ts",
     "typecheck": "tsc -p . && tsc -p public/src",
     "test": "node --disable-warning=ExperimentalWarning scan.ts --test && node --disable-warning=ExperimentalWarning git.ts --test && node --disable-warning=ExperimentalWarning db.ts --test && node --disable-warning=ExperimentalWarning auth.ts --test && node --disable-warning=ExperimentalWarning requirements.ts --test",
+    "boot-task": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/boot-task.ps1",
     "reset": "node --disable-warning=ExperimentalWarning auth.ts --reset"
   },
   "dependencies": {

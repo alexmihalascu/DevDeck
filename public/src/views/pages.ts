@@ -3,7 +3,7 @@ import type { Project, Requirement } from '../../../types.ts';
 import { esc, fmtDur, fmtSize } from '../util.ts';
 import { api } from '../net.ts';
 import {
-  state, SERVICES, termsOf, termFor, statusOf, projectOf, portOwner, serviceTerm, serviceState, visibleProjects,
+  state, SERVICES, termsOf, termFor, statusOf, projectOf, portOwner, serviceTerm, serviceState, serviceUrl, visibleProjects,
   since, uptime, statChip, portLink, avatar, gitLine, emptyState, skeletonRows,
 } from '../state.ts';
 import { usageCharts, processTable, processRows, meterValue } from '../charts.ts';
@@ -72,33 +72,59 @@ export async function loadRequirements(projectId: string, force = false) {
   if (state.selected === projectId) render();
 }
 
-const REQ_ICON = { ok: 'ph-check-circle', warn: 'ph-warning', fail: 'ph-x-circle', unknown: 'ph-question' };
+// One place for "what starts by itself": Windows login -> Devdeck -> services -> chosen script of each app.
+function bootBlock(p: Project): string {
+  const services = state.config.services;
+  const uses = new Set(p.services || []);
+  const detectedDb = (id: string) => !!p.db && id === 'xampp-mysql' && !uses.has(id); // from .env / wp-config: always on
+  const svcPlan = services.filter((s) => uses.has(s.id) || detectedDb(s.id)).map((s) => s.name);
+  const appPlan = p.apps.filter((a) => a.autostart).map((a) => `${a.name}: ${a.autostart}${a.install && a.install !== 'ok' ? ' (installs first)' : ''}`);
+  const plan = [...svcPlan, ...appPlan];
+  const win = state.me.autostart;
+  return `<section class="app-block boot">
+    <div class="app-top">
+      <i class="ph ph-power ${p.bootStart ? 'good' : 'muted'}"></i><h3>Auto-start</h3>
+      <span class="muted small">${p.bootStart ? (plan.length ? 'starts with Devdeck' : 'on, but nothing is selected') : 'off'}</span>
+      <label class="check actions"><input type="checkbox" data-proj-setting="bootStart" ${p.bootStart ? 'checked' : ''}> Start this project when Devdeck starts</label>
+    </div>
+    <div class="proj-settings">
+      ${p.apps.map((a) => `<label class="check" title="The script Start all and boot run for this app">${esc(a.name)}
+        <select data-proj-auto="${esc(a.id)}" aria-label="Script to auto-start for ${esc(a.name)}"><option value="">nothing</option>
+          ${a.scripts.map((s) => `<option value="${esc(s)}" ${a.autostart === s ? 'selected' : ''}>${esc(s)}</option>`).join('')}</select></label>`).join('')}
+      ${services.length ? `<span class="muted small">Needs first</span>${services.map((svc) => detectedDb(svc.id)
+        ? `<label class="check" title="This project uses the database ${esc(p.db)}, so ${esc(svc.name)} starts before its scripts"><input type="checkbox" checked disabled> ${esc(svc.name)} <span class="muted small">detected</span></label>`
+        : `<label class="check" title="Started first (if it isn't running) and waited for"><input type="checkbox" data-proj-service="${esc(svc.id)}" ${uses.has(svc.id) ? 'checked' : ''}> ${esc(svc.name)}</label>`).join('')}` : ''}
+    </div>
+    <p class="muted small boot-note">${plan.length ? `Order: ${plan.map(esc).join(' → ')}.` : 'Pick a script above to start something.'}
+      ${win === null ? 'Devdeck itself starts with Windows only from the host PC\'s settings.'
+        : win ? 'Devdeck starts when you sign in to Windows, so this runs after every restart.'
+        : 'Devdeck does not start with Windows yet: <button class="link-btn" data-act="autostart-toggle">turn it on</button>.'}</p>
+  </section>`;
+}
+
+const REQ_ICON ={ ok: 'ph-check-circle', warn: 'ph-warning', fail: 'ph-x-circle', unknown: 'ph-question' };
 function requirementsBlock(p: Project): string {
   loadRequirements(p.id);
   const items = state.requirements[p.id]?.items || [];
-  const bad = items.filter((i) => i.status === 'fail' || i.status === 'warn').length;
-  const services = state.config.services;
-  const uses = new Set(p.services || []);
+  const bad = items.filter((i) => !i.skipped && (i.status === 'fail' || i.status === 'warn')).length;
+  const skippedCount = items.filter((i) => i.skipped).length;
   return `<section class="app-block req">
     <div class="app-top">
       <i class="ph ${bad ? 'ph-warning-circle bad' : 'ph-seal-check good'}"></i>
       <h3>Requirements</h3>
-      <span class="muted small">${!items.length ? 'checking...' : bad ? `${bad} need attention` : 'all good'}</span>
+      <span class="muted small">${!items.length ? 'checking...' : bad ? `${bad} need attention` : 'all good'}${skippedCount ? `, ${skippedCount} skipped` : ''}</span>
       <div class="actions"><button class="icon-btn" data-act="req-refresh" title="Check again"><i class="ph ph-arrow-clockwise"></i></button></div>
     </div>
-    <div class="proj-settings">
-      <label class="check" title="After a reboot, when Devdeck starts, run Start all for this project"><input type="checkbox" data-proj-setting="bootStart" ${p.bootStart ? 'checked' : ''}> Start when Devdeck starts</label>
-      ${services.length ? `<span class="muted small">Needs</span>${services.map((svc) => `
-        ${p.db && svc.id === 'xampp-mysql' && !uses.has(svc.id)
-          // Detected from .env / wp-config: always on, so it can't be unticked by mistake.
-          ? `<label class="check" title="This project uses the database ${esc(p.db)}, so ${esc(svc.name)} starts before its scripts"><input type="checkbox" checked disabled> ${esc(svc.name)} <span class="muted small">detected</span></label>`
-          : `<label class="check" title="Its scripts start ${esc(svc.name)} first (if it isn't running) and wait for it"><input type="checkbox" data-proj-service="${esc(svc.id)}" ${uses.has(svc.id) ? 'checked' : ''}> ${esc(svc.name)}</label>`}`).join('')}` : ''}
-    </div>
     ${!items.length && state.requirements[p.id]?.loading ? skeletonRows(2) : ''}
-    ${items.map((i) => `<div class="req-row ${i.status}">
-      <i class="ph-fill ${REQ_ICON[i.status]}" aria-label="${i.status}"></i>
-      <span class="req-label">${esc(i.label)}</span><span class="req-detail">${esc(i.detail)}</span>
-      ${i.fix ? `<button class="btn sm${i.status === 'fail' ? ' btn-primary' : ''}" data-act="req-fix" data-kind="${i.fix.kind}" data-arg="${esc(i.fix.arg)}">${esc(i.fix.label)}</button>` : '<span></span>'}
+    ${items.map((i) => `<div class="req-row ${i.skipped ? 'skipped' : i.status}">
+      <i class="ph-fill ${i.skipped ? 'ph-minus-circle' : REQ_ICON[i.status]}" aria-label="${i.skipped ? 'skipped' : i.status}"></i>
+      <span class="req-label">${esc(i.label)}</span><span class="req-detail">${i.skipped ? '<span class="tag">Skipped</span> ' : ''}${esc(i.detail)}</span>
+      <span class="req-actions">
+        ${!i.skipped && i.fix ? `<button class="btn sm" data-act="req-fix" data-kind="${i.fix.kind}" data-arg="${esc(i.fix.arg)}">${esc(i.fix.label)}</button>` : ''}
+        ${i.skipped
+          ? `<button class="btn sm" data-act="req-skip" data-pid="${esc(p.id)}" data-req="${esc(i.id)}" data-skip="0" aria-label="Restore check: ${esc(i.label)}"><i class="ph ph-arrow-counter-clockwise"></i>Restore</button>`
+          : `<button class="btn sm" data-act="req-skip" data-pid="${esc(p.id)}" data-req="${esc(i.id)}" data-skip="1" aria-label="Stop checking: ${esc(i.label)}" title="Stop checking this item"><i class="ph ph-eye-slash"></i>Skip</button>`}
+      </span>
     </div>`).join('')}
   </section>`;
 }
@@ -124,7 +150,7 @@ function conflictNote(m: ReturnType<typeof termsOf>[number] | undefined): string
 
 export function overviewPage(p: Project): string {
   const running = processRows(p.id);
-  return `<div class="page-inner">${infoStrip(p)}${requirementsBlock(p)}
+  return `<div class="page-inner">${infoStrip(p)}${bootBlock(p)}${requirementsBlock(p)}
     ${running.length ? `<section><h2>Usage <span class="muted">${running.length} running</span></h2>
       <div data-usage="${esc(p.id)}">${usageCharts(running.map((r) => r.key))}</div>
       <div data-proc-table="${esc(p.id)}">${processTable(running)}</div></section>` : ''}
@@ -242,8 +268,10 @@ export function servicesPage(): string {
   return `<div class="page-inner">${services.map((svc) => {
     const m = serviceTerm(svc);
     const st = serviceState(svc);
-    const label = ({ running: 'Running', external: 'Running, started outside Devdeck', error: `Crashed (exit ${m?.code})` } as Record<string, string>)[st] || 'Stopped';
+    const label = ({ running: 'Running', external: 'Running, started outside Devdeck', busy: `Not running: port ${svc.port} is used by another program`, error: `Crashed (exit ${m?.code})` } as Record<string, string>)[st] || 'Stopped';
     const owner = portOwner(svc.port);
+    const url = serviceUrl(svc, location.href);
+    const canRestart = st === 'running' || (st === 'external' && !!svc.stopCmd && !!svc.port);
     return `<section class="app-block" data-sid="${esc(svc.id)}">
       <div class="app-top">
         <span class="dot ${st}"></span><h3>${esc(svc.name)}</h3>
@@ -255,12 +283,14 @@ export function servicesPage(): string {
           ${m?.status === 'exited' && m.endedAt ? `<span class="tag">stopped ${fmtDur(Date.now() - m.endedAt)} ago</span>` : ''}
         </div>
         <div class="actions">
-          ${svc.url ? `<a class="btn sm" href="${esc(svc.url)}" target="_blank" rel="noopener"><i class="ph ph-arrow-square-out"></i>Open</a>` : ''}
-          ${m?.status === 'running'
-            ? `<button class="btn sm btn-danger" data-act="kill" data-tid="${m.id}"><i class="ph ph-stop"></i>Stop</button>
-               <button class="btn sm" data-act="restart" data-tid="${m.id}"><i class="ph ph-arrow-clockwise"></i>Restart</button>`
+          ${url ? `<a class="btn sm" href="${esc(url)}" target="_blank" rel="noopener"><i class="ph ph-arrow-square-out"></i>Open</a>` : ''}
+          ${url || svc.port ? '<button class="icon-btn" data-act="copy-service" title="Copy service address" aria-label="Copy service address"><i class="ph ph-copy"></i></button>' : ''}
+          ${st === 'running'
+            ? '<button class="btn sm btn-danger" data-act="stop-service"><i class="ph ph-stop"></i>Stop</button>'
             : st === 'external' ? (svc.stopCmd ? '<button class="btn sm btn-danger" data-act="stop-service"><i class="ph ph-stop"></i>Stop</button>' : '')
-            : '<button class="btn sm" data-act="start-service"><i class="ph-fill ph-play"></i>Start</button>'}
+            : `<button class="btn sm" data-act="start-service" ${st === 'busy' ? 'disabled title="Another program is using this service port"' : ''}><i class="ph-fill ph-play"></i>Start</button>`}
+          ${canRestart ? '<button class="btn sm" data-act="restart-service"><i class="ph ph-arrow-clockwise"></i>Restart</button>' : ''}
+          <button class="btn sm${svc.autostart ? ' on' : ''}" data-act="service-autostart" aria-pressed="${svc.autostart}" title="Start this service when Devdeck starts"><i class="ph ph-power"></i>Auto-start ${svc.autostart ? 'on' : 'off'}</button>
           ${m ? `<button class="btn sm" data-act="focus" data-tid="${m.id}"><i class="ph ph-terminal-window"></i>Output</button>` : ''}
           <button class="icon-btn" data-act="edit-service" title="Edit"><i class="ph ph-pencil-simple"></i></button>
           <button class="icon-btn" data-act="remove-service" title="Remove"><i class="ph ph-trash"></i></button>

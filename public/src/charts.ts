@@ -125,7 +125,7 @@ export function processRows(projectId?: string): ProcRow[] {
   }
   if (!projectId) for (const svc of state.config.services) {
     const owner = svc.port ? state.health[svc.port] : null;
-    if (owner && !rows.some((r) => r.meta?.serviceId === svc.id)) rows.push({ key: `p${svc.port}`, label: svc.name, sub: 'started outside Devdeck', startedAt: owner.startedAt ?? null, port: svc.port });
+    if (owner && !owner.foreign && !rows.some((r) => r.meta?.serviceId === svc.id)) rows.push({ key: `p${svc.port}`, label: svc.name, sub: 'started outside Devdeck', startedAt: owner.startedAt ?? null, port: svc.port });
   }
   return rows;
 }

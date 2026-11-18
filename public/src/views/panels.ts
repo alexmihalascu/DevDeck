@@ -298,9 +298,10 @@ export function drawEnv() {
 }
 
 // ---------- settings (section nav with search, grouped rows) ----------
-type SettingsSection = 'general' | 'network' | 'accounts' | 'devices';
+type SettingsSection = 'general' | 'projects' | 'network' | 'accounts' | 'devices';
 const SECTIONS: { id: SettingsSection; label: string; icon: string; group: string }[] = [
   { id: 'general', label: 'General', icon: 'ph-sliders-horizontal', group: 'Devdeck' },
+  { id: 'projects', label: 'Projects', icon: 'ph-folders', group: 'Devdeck' },
   { id: 'network', label: 'Network', icon: 'ph-wifi-high', group: 'Devdeck' },
   { id: 'accounts', label: 'Accounts', icon: 'ph-users', group: 'Security' },
   { id: 'devices', label: 'Devices', icon: 'ph-devices', group: 'Security' },
@@ -310,6 +311,8 @@ const ITEMS: { id: string; section: SettingsSection; title: string; desc: string
   { id: 'theme', section: 'general', title: 'Theme', desc: 'Follow Windows, or stay light or dark.' },
   { id: 'notify', section: 'general', title: 'Crash notifications', desc: 'A Windows notification when a script or service crashes while Devdeck is in the background.' },
   { id: 'autostart', section: 'general', title: 'Start Devdeck with Windows', desc: 'Runs in the background after you sign in to Windows, no window. Projects and services set to auto-start come up with it.', local: true },
+  { id: 'resume', section: 'general', title: 'Restore what was running', desc: "After a restart, Devdeck brings back the scripts that were running and that you hadn't stopped, with the services they need. To start Devdeck before sign-in, run npm run boot-task once.", local: true },
+  { id: 'projects', section: 'projects', title: 'Projects', desc: 'Remove a project from Devdeck (nothing is deleted from disk) or restore a removed one.' },
   { id: 'shortcut', section: 'general', title: 'Desktop shortcut', desc: "Starts Devdeck if it isn't running and opens it in the browser.", local: true },
   { id: 'urls', section: 'network', title: 'Addresses on your network', desc: 'Open one of these on another PC or phone and sign in.' },
   { id: 'http', section: 'network', title: 'Plain HTTP', desc: 'Traffic is not encrypted, so use network access only on a network you trust.' },
@@ -374,7 +377,17 @@ function settingsPage(section: SettingsSection): string {
     return group('Appearance', row('theme', `<div class="seg-ctl" role="group" aria-label="Theme">${opt('system', 'ph-monitor', 'System')}${opt('light', 'ph-sun', 'Light')}${opt('dark', 'ph-moon', 'Dark')}</div>`))
       + group('Notifications', row('notify', switchCtl(state.notify, 'notify', 'Crash notifications')))
       + (me.local ? group('This PC', row('autostart', switchCtl(!!me.autostart, 'autostart-toggle', 'Start Devdeck with Windows'))
+        + row('resume', switchCtl(!!state.config.resumeRunning, 'resume-toggle', 'Restore what was running'))
         + row('shortcut', '<button class="btn sm" data-act="shortcut"><i class="ph ph-desktop"></i>Create</button>')) : '');
+  }
+  if (section === 'projects') {
+    const excluded = state.config.excluded ?? [];
+    return group('Projects', state.config.projects.map((p) => row(`project-${p.id}`,
+      `<button class="btn sm" data-act="project-remove" data-pid="${esc(p.id)}" aria-label="Remove ${esc(p.name)} from Devdeck"><i class="ph ph-trash"></i>Remove</button>`,
+      { title: esc(p.name), desc: `<span class="mono">${esc(p.path)}</span>` })).join('') || row('projects', '', { desc: 'No projects.' }))
+      + group('Removed projects', excluded.map((path) => row(`excluded-${path}`,
+        `<button class="btn sm" data-act="project-restore" data-path="${esc(path)}" aria-label="Restore ${esc(path)}"><i class="ph ph-arrow-counter-clockwise"></i>Restore</button>`,
+        { title: '<i class="ph ph-folder-dashed muted"></i>Removed', desc: `<span class="mono">${esc(path)}</span>` })).join(''));
   }
   if (section === 'network') {
     const urls = me.urls || [];

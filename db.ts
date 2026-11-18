@@ -2,12 +2,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { pipeline } from 'node:stream/promises';
 import { execFile, spawn } from 'node:child_process';
 import type { BackupFile, DbInfo } from './types.ts';
 
 const SYSTEM = new Set(['information_schema', 'performance_schema', 'mysql', 'sys', 'phpmyadmin', 'test']);
 const NAME_RE = /^[\w$-]{1,64}$/;
-const FILE_RE = /^(.+)-(\d{8}-\d{6})(-pre-restore|-auto|-pre-pull)?\.sql$/;
+const FILE_RE = /^(.+)-(\d{8}-\d{6})(?:-[a-f0-9]{12})?(-pre-restore|-auto|-pre-pull)?\.sql$/;
 const fail = (message: string, status = 400) => Object.assign(new Error(message), { status });
 
 // Local time, so file names match the clock on the wall: 20261029-200604
@@ -45,6 +47,7 @@ export function createDb({ dir, bin, creds }: DbOptions) {
       const info = parseBackup(f);
       if (!info) return [];
       const st = fs.statSync(path.join(dir, f));
+      if (!st.isFile()) return [];
       return [{ file: f, ...info, size: st.size, at: st.mtimeMs }];
     }).sort((a, b) => b.at - a.at);
   }
@@ -60,10 +63,16 @@ export function createDb({ dir, bin, creds }: DbOptions) {
 
   async function backup(name: string, suffix = '') {
     if (!NAME_RE.test(name || '')) throw fail('Bad database name');
+    if (!['', '-pre-restore', '-auto', '-pre-pull'].includes(suffix)) throw fail('Bad backup kind');
     if (!(await databases()).some((d) => d.name === name)) throw fail(`Database "${name}" does not exist`, 404);
     fs.mkdirSync(dir, { recursive: true });
-    const file = path.join(dir, `${name}-${stamp()}${suffix}.sql`);
-    await run('mysqldump', ['--single-transaction', '--routines', '--triggers', '--events', '--databases', name, `--result-file=${file}`]);
+    const file = path.join(dir, `${name}-${stamp()}-${randomBytes(6).toString('hex')}${suffix}.sql`);
+    const partial = `${file}.partial`;
+    try {
+      await run('mysqldump', ['--single-transaction', '--routines', '--triggers', '--events', '--databases', name, `--result-file=${partial}`]);
+      // Publish only completed dumps. Unique names keep concurrent backups independent.
+      fs.renameSync(partial, file);
+    } catch (e) { fs.rmSync(partial, { force: true }); throw e; }
     return { file: path.basename(file), size: fs.statSync(file).size };
   }
 
@@ -74,14 +83,20 @@ export function createDb({ dir, bin, creds }: DbOptions) {
     // Safety net: snapshot the current state before overwriting it.
     let safety: string | null = null;
     if ((await databases()).some((d) => d.name === info.name)) safety = (await backup(info.name, '-pre-restore')).file;
-    await new Promise<void>((resolve, reject) => {
-      const p = spawn(exe('mysql'), ['-u', user()], { env: env(), windowsHide: true });
+    const p = spawn(exe('mysql'), ['-u', user()], { env: env(), windowsHide: true });
+    const exited = new Promise<void>((resolve, reject) => {
       let errOut = '';
       p.stderr.on('data', (d: Buffer) => { errOut += d; });
       p.on('error', reject);
-      p.on('close', (code) => code ? reject(fail(errOut.trim() || `mysql exited with ${code}`)) : resolve());
-      fs.createReadStream(full).pipe(p.stdin);
+      p.on('close', (code) => code !== 0 ? reject(fail(errOut.trim() || `mysql exited with ${code}`)) : resolve());
     });
+    try { await Promise.all([exited, pipeline(fs.createReadStream(full), p.stdin)]); }
+    catch (e) {
+      // mysql dying on bad SQL surfaces here as EPIPE; its stderr is the real reason.
+      const real = (e as NodeJS.ErrnoException).code === 'EPIPE' ? await exited.then(() => null, (x) => x) : null;
+      p.kill();
+      throw real || e;
+    }
     return { ok: true, safety };
   }
 
@@ -101,9 +116,14 @@ export function createDb({ dir, bin, creds }: DbOptions) {
     },
     // Scheduled backups rotate: keep the newest `keep` automatic copies per database, never touch manual ones.
     prune(keep: number) {
-      const byDb: Record<string, BackupFile[]> = {};
-      for (const b of backups().filter((x) => x.kind === 'auto')) (byDb[b.name] ??= []).push(b);
-      for (const list of Object.values(byDb)) for (const b of list.slice(keep)) fs.unlinkSync(path.join(dir, b.file));
+      if (!Number.isInteger(keep) || keep < 1) throw fail('Keep must be a positive integer');
+      const byDb = new Map<string, BackupFile[]>();
+      for (const b of backups().filter((x) => x.kind === 'auto')) {
+        const list = byDb.get(b.name) || [];
+        list.push(b);
+        byDb.set(b.name, list);
+      }
+      for (const list of byDb.values()) for (const b of list.slice(keep)) fs.unlinkSync(path.join(dir, b.file));
     },
     restore,
     remove: (file: string) => {

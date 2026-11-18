@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFile, execFileSync } from 'node:child_process';
 import pty, { type IPty } from '@lydell/node-pty';
-import { readScripts, runCmd, installState, PMS } from './scan.ts';
+import { readScripts, runCmd, installState, PMS, isForeign } from './scan.ts';
 import { findExe } from './git.ts';
 import {
   config, save, findApp, broadcast, isDir, run, psQuote,
@@ -30,6 +30,8 @@ interface Term {
   stopCmd?: string | null;
   fixedPort?: number | null;
   install?: boolean;
+  /** Install terminals only: script to start once the install succeeds (boot start of a project without node_modules). */
+  then?: string;
   pty?: IPty | null;
   status?: 'running' | 'exited';
   code?: number | null;
@@ -80,16 +82,20 @@ function startPty(rec: Term) {
     if (rec.pty !== p) return; // stale exit from a pty that was already replaced
     clearTimeout(rec.forceKill);
     Object.assign(rec, { pty: null, status: 'exited', code: exitCode, endedAt: Date.now() });
-    if (rec.restart) {
+    if (rec.restart && !rec.closing) {
       rec.restart = false;
       const line = '\r\n\x1b[2m--- restart ---\x1b[0m\r\n';
       rec.buf += line;
       broadcast({ t: 'output', id: rec.id, data: line });
-      startPty(rec);
+      try { if (rec.serviceId) startService(rec.serviceId); else startPty(rec); }
+      catch (e) { broadcast({ t: 'error', message: (e as Error).message }); }
     }
     if (rec.install) {
       const { app } = findApp(rec.appId);
       if (app) { app.install = installState(app.path); save(); broadcast({ t: 'config' }); }
+      const next = rec.then;
+      rec.then = undefined;
+      if (next && app?.install === 'ok') spawnTerm(rec.appId as string, next);
     }
     if (rec.closing) { terms.delete(rec.id); broadcast({ t: 'closed', id: rec.id }); return; }
     broadcast({ t: 'term', term: meta(rec) });
@@ -97,7 +103,7 @@ function startPty(rec: Term) {
   broadcast({ t: 'term', term: meta(rec) });
 }
 
-function installApp(appId: string) {
+function installApp(appId: string, then?: string) {
   const { project, app } = findApp(appId);
   if (!project || !app || !['npm', 'pnpm', 'yarn', 'bun'].includes(app.pm)) return;
   let rec = [...terms.values()].find((r) => r.appId === appId && r.install);
@@ -107,6 +113,7 @@ function installApp(appId: string) {
     terms.set(rec.id, rec);
   }
   rec.cmd = `${app.pm} install`;
+  rec.then = then;
   startPty(rec);
 }
 
@@ -124,7 +131,7 @@ function spawnTerm(appId: string, script: string | null) {
     title: `${app.name}${script ? ` : ${script}` : ' : shell'}`,
   };
   terms.set(rec.id, rec);
-  startPty(rec);
+  try { startPty(rec); } catch (e) { terms.delete(rec.id); throw e; } // e.g. missing cwd: no ghost tab
 }
 
 // Windows: killing the shell leaves node.exe children holding ports, so kill the whole tree.
@@ -153,6 +160,41 @@ export function startService(serviceId: string) {
   startPty(rec);
 }
 
+const serviceRestarts = new Map<string, Promise<void>>();
+/** Restart only the configured service; an unrelated listener is never terminated. */
+export function restartService(serviceId: string): Promise<void> {
+  const existing = serviceRestarts.get(serviceId);
+  if (existing) return existing;
+  const job = (async () => {
+    const svc = config.services.find((s) => s.id === serviceId);
+    if (!svc) throw new Error('Unknown service');
+    const rec = [...terms.values()].find((r) => r.serviceId === serviceId);
+    if (rec?.pty) { rec.restart = true; rec.closing = false; killTree(rec); return; }
+    await checkHealth();
+    const owner = svc.port && health[svc.port];
+    if (owner) {
+      const expected = svc.cmd.match(/([\w.-]+)\.exe\b/i)?.[1].toLowerCase();
+      if (owner.foreign || !owner.name || !expected || owner.name.toLowerCase() !== expected) throw new Error(`Port ${svc.port} belongs to another or unidentified process. Restart refused.`);
+      if (!svc.stopCmd || !svc.port) throw new Error('An external service needs a stop command and a port to restart.');
+      await new Promise<void>((resolve, reject) => execFile(POWERSHELL, ['-NoProfile', '-Command', svc.stopCmd],
+        { windowsHide: true, cwd: isDir(svc.cwd) ? svc.cwd : ROOT, timeout: 15000 },
+        (err, _out, stderr) => err ? reject(new Error(stderr.trim() || err.message)) : resolve()));
+      let stopped = false;
+      for (let i = 0; i < 60; i++) {
+        const current = (await listeningPids())[svc.port];
+        if (!current) { stopped = true; break; }
+        if (current !== owner.pid) throw new Error(`Port ${svc.port} changed owners. Restart cancelled.`);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      if (!stopped) throw new Error('Service did not stop within 30 seconds. Restart cancelled.');
+    }
+    startService(serviceId);
+  })();
+  serviceRestarts.set(serviceId, job);
+  void job.finally(() => serviceRestarts.delete(serviceId)).catch(() => {});
+  return job;
+}
+
 export function killAll() {
   for (const rec of terms.values()) {
     if (rec.pty) try { execFileSync(TASKKILL, ['/T', '/F', '/PID', String(rec.pty.pid)], { stdio: 'ignore' }); } catch {}
@@ -171,24 +213,43 @@ export function neededServices(p: Project): { id: string; auto: boolean }[] {
 async function ensureServices(p: Project) {
   const deps = neededServices(p).map(({ id }) => config.services.find((s) => s.id === id)).filter((s) => !!s);
   if (deps.length) {
-    const pids = await listeningPids();
-    const pending = deps.filter((s) => !(s.port && pids[s.port]));
+    await checkHealth();
+    const up = (port: number | null) => { const o = port && health[port]; return !!o && !o.foreign; };
+    const pending = deps.filter((s) => !up(s.port));
     for (const s of pending) startService(s.id);
     // Wait (max 30 s) until every dependency with a port answers, so the backend doesn't boot into "connection refused".
     for (let i = 0; i < 60 && pending.some((s) => s.port); i++) {
-      const now = await listeningPids();
-      if (pending.every((s) => !s.port || now[s.port])) break;
+      await checkHealth();
+      if (pending.every((s) => !s.port || up(s.port))) break;
       await new Promise((r) => setTimeout(r, 500));
     }
     if (pending.length) await checkHealth(); // show the dependencies as up right away, not on the next 3 s tick
   }
 }
 
+/** Scripts running right now that nobody stopped: what "resume after restart" brings back. */
+export function runningScripts(): { appId: string; script: string }[] {
+  return [...terms.values()]
+    .filter((r) => r.status === 'running' && !r.killed && !r.install && !r.serviceId && r.appId && r.script)
+    .map((r) => ({ appId: r.appId as string, script: r.script as string }));
+}
+
+export async function resumeScripts(list: { appId: string; script: string }[]) {
+  const projects = new Set(list.map((x) => findApp(x.appId).project).filter((p) => !!p));
+  for (const p of projects) await ensureServices(p);
+  for (const { appId, script } of list) try { spawnTerm(appId, script); } catch (e) { console.error(`resume ${script}:`, e); }
+}
+
 export async function startAll(projectId: string) {
   const p = config.projects.find((x) => x.id === projectId);
   if (!p) return;
   await ensureServices(p);
-  for (const a of p.apps) if (a.autostart) spawnTerm(a.id, a.autostart);
+  for (const a of p.apps) {
+    if (!a.autostart) continue;
+    // Missing dependencies would just crash the script: install first, then start it.
+    if (a.install && a.install !== 'ok' && a.pm !== 'composer') installApp(a.id, a.autostart);
+    else spawnTerm(a.id, a.autostart);
+  }
 }
 
 type Handler<T extends ClientMsg['t']> = (msg: Extract<ClientMsg, { t: T }>) => unknown;
@@ -202,6 +263,7 @@ export const handlers: { [K in ClientMsg['t']]: Handler<K> } = {
   restart: async ({ id }) => {
     const r = terms.get(id);
     if (!r) return;
+    if (r.serviceId) return restartService(r.serviceId);
     if (r.pty) { r.restart = true; killTree(r); return; }
     const p = r.script && config.projects.find((x) => x.id === r.projectId);
     if (p) await ensureServices(p);
@@ -214,18 +276,20 @@ export const handlers: { [K in ClientMsg['t']]: Handler<K> } = {
     Object.assign(rec, { cols, rows });
     try { rec.pty?.resize(cols, rows); } catch {}
   },
-  kill: ({ id }) => { const r = terms.get(id); if (r) killTree(r); },
+  kill: ({ id }) => { const r = terms.get(id); if (r) { r.restart = false; killTree(r); } },
   close: ({ id }) => {
     const r = terms.get(id);
     if (!r) return;
+    r.restart = false;
     if (r.pty) { r.closing = true; killTree(r); } else { terms.delete(id); broadcast({ t: 'closed', id }); }
   },
   startAll: ({ projectId }) => startAll(projectId),
-  stopAll: ({ projectId }) => { for (const r of terms.values()) if (r.projectId === projectId) killTree(r); },
+  stopAll: ({ projectId }) => { for (const r of terms.values()) if (r.projectId === projectId) { r.restart = false; killTree(r); } },
   startService: ({ serviceId }) => startService(serviceId),
+  restartService: ({ serviceId }) => restartService(serviceId),
   stopService: ({ serviceId }) => {
     const rec = [...terms.values()].find((r) => r.serviceId === serviceId && r.pty);
-    if (rec) return killTree(rec);
+    if (rec) { rec.restart = false; return killTree(rec); }
     // Started outside Devdeck (e.g. XAMPP panel): only a graceful stop command can reach it.
     const svc = config.services.find((s) => s.id === serviceId);
     if (svc?.stopCmd) execFile(POWERSHELL, ['-NoProfile', '-Command', svc.stopCmd], { windowsHide: true, cwd: isDir(svc.cwd) ? svc.cwd : ROOT }, () => checkHealth());
@@ -237,8 +301,21 @@ export const handlers: { [K in ClientMsg['t']]: Handler<K> } = {
   },
   docker: ({ action, id }) => dockerAction(action, id),
 };
-export function handle(msg: ClientMsg) {
-  (handlers[msg.t] as Handler<typeof msg.t> | undefined)?.(msg as never);
+export async function handle(msg: ClientMsg, onError: (message: string) => void = () => {}) {
+  try {
+    if (!msg || typeof msg !== 'object' || !Object.hasOwn(handlers, msg.t)) throw new Error('Unknown terminal action');
+    const data = msg as unknown as Record<string, unknown>;
+    const key = ['spawn', 'install'].includes(msg.t) ? 'appId'
+      : ['startAll', 'stopAll'].includes(msg.t) ? 'projectId'
+      : ['startService', 'stopService', 'restartService'].includes(msg.t) ? 'serviceId' : msg.t === 'killPid' ? null : 'id';
+    if (key && (typeof data[key] !== 'string' || !(data[key] as string).length)) throw new Error(`Invalid ${key}`);
+    if (msg.t === 'spawn' && msg.script != null && typeof msg.script !== 'string') throw new Error('Invalid script');
+    if (msg.t === 'input' && (typeof msg.data !== 'string' || msg.data.length > BUF_LIMIT)) throw new Error('Invalid terminal input');
+    if (msg.t === 'resize' && ![msg.cols, msg.rows].every((n) => Number.isInteger(n) && n > 1 && n <= 1000)) throw new Error('Invalid terminal size');
+    if (msg.t === 'killPid' && (!Number.isInteger(msg.pid) || msg.pid <= 0)) throw new Error('Invalid process ID');
+    if (msg.t === 'docker' && !['start', 'stop', 'restart'].includes(msg.action)) throw new Error('Invalid Docker action');
+    await (handlers[msg.t] as Handler<typeof msg.t>)(msg as never);
+  } catch (e) { onError(e instanceof Error ? e.message : String(e)); }
 }
 
 // ---------- port health: who listens, since when (works for things started outside Devdeck too) ----------
@@ -273,9 +350,13 @@ export async function checkHealth() {
   await procInfo([...new Set([...ports].map((p) => pids[p]).filter(Boolean))]);
   const next: Health = {};
   for (const p of ports) next[p] = pids[p] ? { pid: pids[p], ...procCache.get(pids[p]) } : false;
+  for (const s of config.services) {
+    const o = s.port && next[s.port];
+    if (o && isForeign(s.cmd, o.name)) o.foreign = true;
+  }
   if (JSON.stringify(next) !== JSON.stringify(health)) { health = next; broadcast({ t: 'health', health }); }
 }
-setInterval(checkHealth, 3000);
+setInterval(() => checkHealth().catch(() => {}), 3000).unref();
 
 // ---------- CPU / RAM: per process tree (npm -> node -> vite all count) and for the whole PC ----------
 export let stats: Stats = {};
@@ -362,7 +443,7 @@ async function refreshStats() {
   stats = next;
   broadcast({ t: 'stats', stats, machine, at: now });
 }
-setInterval(() => refreshStats().catch(() => {}), 5000);
+setInterval(() => refreshStats().catch(() => {}), 5000).unref();
 export const statsHistory = (): History => history;
 
 // ---------- Docker (only when the CLI is installed) ----------
@@ -393,7 +474,7 @@ export function dockerLogs(id: string) {
   return new Promise<string>((resolve) => execFile(DOCKER, ['logs', '--tail', '2000', '--timestamps', id],
     { windowsHide: true, maxBuffer: 16 << 20 }, (_e, so, se) => resolve((so || '') + (se || ''))));
 }
-setInterval(refreshDocker, 5000);
+setInterval(() => refreshDocker().catch(() => {}), 5000).unref();
 
 // ---------- Windows Terminal ----------
 export function openWt(projectId: string): boolean {
@@ -401,9 +482,10 @@ export function openWt(projectId: string): boolean {
   const apps = p?.apps.filter((a): a is typeof a & { autostart: string } => !!a.autostart && PMS.includes(a.pm)) || [];
   if (!p || !apps.length) return false;
   const args = ['-w', p.name.replace(/[^\w.-]/g, '_')];
+  const esc = (x: string) => x.replaceAll(';', '\\;'); // wt splits its argv on ';' and names/folders may contain one
   apps.forEach((a, i) => {
     if (i) args.push(';');
-    args.push('new-tab', '--title', `${p.name} / ${a.name}`, '-d', a.path, 'powershell', '-NoExit', '-Command', scriptCmd(a.pm, a.autostart).replaceAll(';', '\\;'));
+    args.push('new-tab', '--title', esc(`${p.name} / ${a.name}`), '-d', esc(a.path), 'powershell', '-NoExit', '-Command', esc(scriptCmd(a.pm, a.autostart)));
   });
   execFile('wt.exe', args, { windowsHide: false }, () => {});
   return true;

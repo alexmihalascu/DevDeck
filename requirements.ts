@@ -6,33 +6,46 @@ import path from 'node:path';
 import type { Project, Requirement, Service } from './types.ts';
 
 /**
- * Does the running Node satisfy an engines/.nvmrc spec? Major-version reasoning only
- * (">=18", "^20", "20.x", "~22.1", "18 || 20", "v20.11.0"); anything fancier answers null = can't tell.
+ * Common stable Node version ranges, including minor/patch requirements.
+ * Unsupported syntax is unknown rather than a misleading pass/fail.
  */
 export function nodeSatisfies(spec: string, version = process.versions.node): boolean | null {
-  const major = Number(version.split('.')[0]);
+  if (!/^v?\d+\.\d+\.\d+$/.test(version)) return null;
+  const actual = version.replace(/^v/, '').split('.').map(Number);
+  const compare = (a: number[], b: number[]) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+  const upper = (lower: number[], index: number) => lower.map((n, i) => i < index ? n : i === index ? n + 1 : 0);
   const parts = spec.split('||').map((s) => s.trim()).filter(Boolean);
   if (!parts.length) return null;
-  let known = false;
+  let unknown = false;
   for (const part of parts) {
     const conds = part.split(/\s+/).filter(Boolean);
     let ok = true, understood = true;
     for (const c of conds) {
-      const m = c.match(/^(>=|>|<=|<|\^|~|=|v)?(\d+)(?:\.(?:\d+|x|\*))*$/i);
+      const m = c.match(/^(>=|>|<=|<|\^|~|=)?v?(\d+|x|\*)(?:\.(\d+|x|\*))?(?:\.(\d+|x|\*))?$/i);
       if (!m) { understood = false; break; }
-      const n = Number(m[2]);
       const op = m[1] || '';
-      if (op === '>=') ok &&= major >= n;
-      else if (op === '>') ok &&= major > n || (major === n && version !== `${n}.0.0`);
-      else if (op === '<=') ok &&= major <= n;
-      else if (op === '<') ok &&= major < n;
-      else ok &&= major === n; // ^20, ~20, 20.x, 20, v20.11
+      const components = m.slice(2, 5);
+      const precision = components.findIndex((n) => n === undefined || /^[x*]$/i.test(n));
+      const count = precision < 0 ? 3 : precision;
+      if (components.slice(count).some((n) => n !== undefined && /^\d+$/.test(n))) { understood = false; break; }
+      if (!count) { if (op && op !== '=') understood = false; continue; }
+      const lower = components.map((n, i) => i < count ? Number(n) : 0);
+      const cmp = compare(actual, lower);
+      const ceiling = upper(lower, count - 1);
+      if (op === '>=') ok &&= cmp >= 0;
+      else if (op === '>') ok &&= count === 3 ? cmp > 0 : compare(actual, ceiling) >= 0;
+      else if (op === '<=') ok &&= count === 3 ? cmp <= 0 : compare(actual, ceiling) < 0;
+      else if (op === '<') ok &&= cmp < 0;
+      else if (op === '~') ok &&= cmp >= 0 && compare(actual, upper(lower, count === 1 ? 0 : 1)) < 0;
+      else if (op === '^') {
+        const firstNonzero = lower.findIndex((n, i) => i < count && n > 0);
+        ok &&= cmp >= 0 && compare(actual, upper(lower, firstNonzero < 0 ? count - 1 : firstNonzero)) < 0;
+      } else ok &&= cmp >= 0 && compare(actual, ceiling) < 0;
     }
-    if (!understood) continue;
-    known = true;
+    if (!understood) { unknown = true; continue; }
     if (ok) return true;
   }
-  return known ? false : null;
+  return unknown ? null : false;
 }
 
 const readJson = (f: string) => { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; } };
@@ -64,7 +77,7 @@ export function checkProject(p: Project, ctx: Context): Requirement[] {
     out.push({
       id: `deps:${a.id}`, label: p.apps.length > 1 ? `${a.name}: dependencies` : 'Dependencies',
       status: a.install === 'ok' ? 'ok' : 'fail',
-      detail: a.install === 'ok' ? 'node_modules matches package.json' : a.install === 'missing' ? 'node_modules is missing' : 'Some packages from package.json are not installed',
+      detail: a.install === 'ok' ? 'Dependencies satisfied (or none needed)' : a.install === 'missing' ? 'node_modules is missing' : 'Some packages from package.json are not installed',
       fix: a.install === 'ok' ? undefined : { kind: 'install', arg: a.id, label: `${a.pm} install` },
     });
   }
@@ -116,7 +129,8 @@ export function checkProject(p: Project, ctx: Context): Requirement[] {
       fix: ctx.databases !== null && !exists ? { kind: 'db', arg: p.db, label: 'Create database' } : undefined,
     });
   }
-  return out;
+  const skip = new Set(p.skippedReqs);
+  return out.map((r) => skip.has(r.id) ? { ...r, status: 'unknown', skipped: true, fix: undefined } : r);
 }
 
 /** Create .env from the example, or append the keys it lacks (empty values, marked). Never overwrites a value. */
@@ -136,7 +150,7 @@ if (process.argv[1]?.endsWith('requirements.ts') && process.argv.includes('--tes
   assert.equal(nodeSatisfies('>=18', '24.14.0'), true);
   assert.equal(nodeSatisfies('^20', '24.14.0'), false);
   assert.equal(nodeSatisfies('20.x || 24.x', '24.14.0'), true);
-  assert.equal(nodeSatisfies('v24.11.0', '24.14.0'), true);
+  assert.equal(nodeSatisfies('v24.11.0', '24.14.0'), false);
   assert.equal(nodeSatisfies('>=18 <22', '24.14.0'), false);
   assert.equal(nodeSatisfies('lts/*', '24.14.0'), null);
   assert.deepEqual([...envKeys('A=1\n# B=2\nexport C="x"\n  D =\n')], ['A', 'C', 'D']);
@@ -165,6 +179,9 @@ if (process.argv[1]?.endsWith('requirements.ts') && process.argv.includes('--tes
   assert.equal(r.env.status, 'ok');
   assert.equal(r.svc.status, 'ok');
   assert.equal(r.db.fix?.kind, 'db');
+  r = byId(checkProject({ ...project, skippedReqs: [`node:${dir}`, 'db'] }, { listening: {}, databases: ['other'], services: [svc], needed }));
+  assert.deepEqual([r.node.status, r.node.skipped, r.db.status, r.db.skipped, r.db.fix], ['unknown', true, 'unknown', true, undefined]);
+  assert.equal(r.svc.skipped, undefined);
   fs.rmSync(dir, { recursive: true });
   console.log('requirements.ts: all checks passed');
 }

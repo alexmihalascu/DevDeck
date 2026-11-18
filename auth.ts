@@ -54,9 +54,11 @@ export const verifyTotp = (secret: string, code: unknown, now = Date.now()): boo
   /^\d{6}$/.test(String(code)) && [-1, 0, 1].some((d) => totp(secret, now + d * 30_000) === String(code));
 
 export const isLoopback = (addr = ''): boolean => addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1';
-export const parseCookies = (header = ''): Record<string, string> => Object.fromEntries(header.split(';').map((c) => {
+export const parseCookies = (header = ''): Record<string, string> => Object.fromEntries(header.split(';').flatMap((c) => {
   const i = c.indexOf('=');
-  return i < 0 ? [c.trim(), ''] : [c.slice(0, i).trim(), decodeURIComponent(c.slice(i + 1).trim())];
+  if (i < 0) return [];
+  try { return [[c.slice(0, i).trim(), decodeURIComponent(c.slice(i + 1).trim())]]; }
+  catch { return []; } // A malformed cookie must not crash HTTP or WebSocket upgrades.
 }));
 // Real adapters first (Wi-Fi, then Ethernet); virtual ones (VMware, Hyper-V, WSL) last since nobody browses to them.
 const VIRTUAL_RE = /vmware|virtualbox|vethernet|hyper-v|wsl|docker|loopback/i;
@@ -86,6 +88,9 @@ export function createAuth({ file }: { file: string }) {
   const tokenHash = (t: string) => crypto.createHash('sha256').update(t).digest('hex');
   const fails = new Map<string, { n: number; until: number }>();
   const tickets = new Map<string, { userId: number; ip: string; at: number }>();
+  const clearTickets = (userId: number) => {
+    for (const [ticket, value] of tickets) if (value.userId === userId) tickets.delete(ticket);
+  };
   const userByName = (name: string) => db.prepare('SELECT * FROM users WHERE username = ?').get(name) as UserRecord | undefined;
   const userById = (id: number) => db.prepare('SELECT * FROM users WHERE id = ?').get(id) as UserRecord | undefined;
   const count = () => (db.prepare('SELECT COUNT(*) AS n FROM users').get() as { n: number }).n;
@@ -100,7 +105,7 @@ export function createAuth({ file }: { file: string }) {
   }
   function failed(ip: string) {
     const f = fails.get(ip);
-    const n = (f && f.until > Date.now() ? 0 : f?.n || 0) + 1;
+    const n = (f?.until && f.until <= Date.now() ? 0 : f?.n || 0) + 1;
     fails.set(ip, { n, until: n >= MAX_FAILS ? Date.now() + LOCK_MS : 0 });
   }
   const locked = (ip: string) => {
@@ -123,11 +128,12 @@ export function createAuth({ file }: { file: string }) {
     login(ip: string, username: unknown, password: unknown, agent?: unknown): LoginResult {
       const lock = locked(ip);
       if (lock) return { error: lock, status: 429 };
-      const u = userByName(String(username || ''));
+      const u = userByName(String(username || '').trim());
       // Hash anyway for unknown users so timing does not reveal which names exist.
       const ok = u ? checkPassword(password, u) : (checkPassword(password, hashPassword('x')), false);
       if (!u || !ok) { failed(ip); return { error: 'Wrong user or password.', status: 401 }; }
       if (u.totp_enabled) {
+        for (const [key, value] of tickets) if (Date.now() - value.at > MFA_TICKET_MS) tickets.delete(key);
         const ticket = crypto.randomBytes(24).toString('hex');
         tickets.set(ticket, { userId: u.id, ip, at: Date.now() });
         return { mfa: true, ticket };
@@ -142,7 +148,7 @@ export function createAuth({ file }: { file: string }) {
       const t = tickets.get(String(ticket));
       if (!t || t.ip !== ip || Date.now() - t.at > MFA_TICKET_MS) { tickets.delete(String(ticket)); return { error: 'Login expired. Start again.', status: 401 }; }
       const u = userById(t.userId);
-      if (!u?.totp_secret || !verifyTotp(u.totp_secret, code)) { failed(ip); return { error: 'Wrong code.', status: 401 }; }
+      if (!u?.totp_enabled || !u.totp_secret || !verifyTotp(u.totp_secret, code)) { failed(ip); return { error: 'Wrong code.', status: 401 }; }
       tickets.delete(String(ticket));
       fails.delete(ip);
       return newSession(u, ip, agent);
@@ -166,12 +172,15 @@ export function createAuth({ file }: { file: string }) {
       const { salt, hash } = hashPassword(String(password));
       db.prepare('UPDATE users SET salt = ?, hash = ? WHERE id = ?').run(salt, hash, userId);
       db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId); // new password signs everything out
+      clearTickets(userId);
     },
-    deleteUser(userId: number) { db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId); db.prepare('DELETE FROM users WHERE id = ?').run(userId); },
+    deleteUser(userId: number) { clearTickets(userId); db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId); db.prepare('DELETE FROM users WHERE id = ?').run(userId); },
     // MFA setup: a pending secret becomes active only after one correct code.
     startMfa(userId: number) {
       const u = userById(userId);
       if (!u) throw fail('No such user', 404);
+      if (u.totp_enabled) throw fail('Two-factor authentication is already enabled. Disable it before setting it up again.', 409);
+      clearTickets(userId);
       const secret = base32(crypto.randomBytes(20));
       db.prepare('UPDATE users SET totp_secret = ?, totp_enabled = 0 WHERE id = ?').run(secret, userId);
       return { secret, uri: `otpauth://totp/Devdeck:${encodeURIComponent(u.username)}?secret=${secret}&issuer=Devdeck&digits=6&period=30` };
@@ -181,7 +190,7 @@ export function createAuth({ file }: { file: string }) {
       if (!u?.totp_secret || !verifyTotp(u.totp_secret, code)) throw fail('Wrong code. Check the time on your phone and try again.');
       db.prepare('UPDATE users SET totp_enabled = 1 WHERE id = ?').run(userId);
     },
-    disableMfa(userId: number) { db.prepare('UPDATE users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?').run(userId); },
+    disableMfa(userId: number) { clearTickets(userId); db.prepare('UPDATE users SET totp_secret = NULL, totp_enabled = 0 WHERE id = ?').run(userId); },
     sessions: (userId: number) => db.prepare('SELECT token_hash AS id, created_at, last_seen, ip, agent FROM sessions WHERE user_id = ? ORDER BY last_seen DESC').all(userId) as unknown as SessionRow[],
     allSessions: () => db.prepare('SELECT s.token_hash AS id, s.created_at, s.last_seen, s.ip, s.agent, u.username FROM sessions s JOIN users u ON u.id = s.user_id ORDER BY s.last_seen DESC').all() as unknown as SessionRow[],
     revoke(id: string, userId: number | null = null) {

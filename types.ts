@@ -30,6 +30,8 @@ export interface Project {
   hidden?: boolean;
   services?: string[];
   bootStart?: boolean;
+  /** Requirement ids (Requirement.id, full) the user chose to ignore. */
+  skippedReqs?: string[];
 }
 
 export interface Service {
@@ -56,10 +58,15 @@ export interface BackupSchedule {
 export interface Config {
   roots: string[];
   manual: string[];
+  /** Absolute project folders the user removed; scans skip them. */
+  excluded: string[];
   projects: Project[];
   services: Service[];
   mysql: { user: string; password: string };
   backup?: BackupSchedule;
+  /** Bring back, after a restart, the scripts that were running (and not stopped by hand). */
+  resumeRunning?: boolean;
+  resume?: { appId: string; script: string }[];
 }
 
 /** What the browser gets: no secrets. */
@@ -83,7 +90,7 @@ export interface TermMeta {
   conflict?: number | null;
 }
 
-export interface PortOwner { pid: number; name?: string | null; startedAt?: number | null }
+export interface PortOwner { pid: number; name?: string | null; startedAt?: number | null; foreign?: boolean /** a service owns this port in config, but another program listens on it */ }
 /** port -> process listening on it, or false */
 export type Health = Record<string, PortOwner | false>;
 export interface Stat { cpu: number | null; mem: number }
@@ -123,6 +130,8 @@ export interface Requirement {
   label: string;
   status: 'ok' | 'warn' | 'fail' | 'unknown';
   detail: string;
+  /** User chose to ignore it: status is 'unknown', it counts as neither fail nor warn. */
+  skipped?: boolean;
   fix?: { kind: 'install' | 'service' | 'env' | 'db'; arg: string; label: string };
 }
 
@@ -131,6 +140,7 @@ export interface BackupFile { file: string; name: string; stamp: string; preRest
 
 /** Server -> browser over the WebSocket. */
 export type ServerMsg =
+  | { t: 'error'; message: string }
   | { t: 'init'; terms: (TermMeta & { buf: string })[]; health: Health; git: Record<string, GitSummary>; docker: DockerState; stats: Stats; machine: Machine | null }
   | { t: 'output'; id: string; data: string }
   | { t: 'term'; term: TermMeta }
@@ -148,7 +158,7 @@ export type ClientMsg =
   | { t: 'resize'; id: string; cols: number; rows: number }
   | { t: 'kill' | 'restart' | 'close'; id: string }
   | { t: 'startAll' | 'stopAll'; projectId: string }
-  | { t: 'startService' | 'stopService'; serviceId: string }
+  | { t: 'startService' | 'stopService' | 'restartService'; serviceId: string }
   | { t: 'install'; appId: string }
   | { t: 'killPid'; pid: number }
   | { t: 'docker'; action: 'start' | 'stop' | 'restart'; id: string };

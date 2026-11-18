@@ -2,7 +2,7 @@
 import type { Project } from '../../types.ts';
 import { $, esc, morph } from './util.ts';
 import {
-  state, SERVICES, termsOf, statusOf, projectOf, portOwner, serviceTerm, serviceState, visibleProjects, projectSub,
+  state, SERVICES, PROJECT_FILTERS, termsOf, statusOf, projectOf, portOwner, serviceTerm, serviceState, visibleProjects, projectSub,
   since, uptime, statChip, statText, portLink, avatar, gitLine,
 } from './state.ts';
 import { queueFit } from './terminals.ts';
@@ -41,7 +41,7 @@ function renderSidebar() {
     const st = serviceState(svc);
     const m = serviceTerm(svc);
     const owner = portOwner(svc.port);
-    const sub = st === 'running' ? `up ${uptime(m)}` : st === 'external' ? `up ${since(owner && owner.startedAt) || '?'}, started outside` : st === 'error' ? `crashed, exit ${m?.code}` : 'stopped';
+    const sub = st === 'running' ? `up ${uptime(m)}` : st === 'external' ? `up ${since(owner && owner.startedAt) || '?'}, started outside` : st === 'busy' ? `port ${svc.port} used by ${esc(owner && owner.name || 'another program')}` : st === 'error' ? `crashed, exit ${m?.code}` : 'stopped';
     return `<button class="row${state.selected === SERVICES ? ' selected-soft' : ''}" data-act="select" data-pid="${SERVICES}">
       <span class="dot ${st}"></span>
       <span class="row-main"><span class="row-title">${esc(svc.name)}</span><span class="row-sub">${sub}</span></span>
@@ -49,17 +49,19 @@ function renderSidebar() {
   }).join('') || `<button class="row add-row${state.selected === SERVICES ? ' selected-soft' : ''}" data-act="select" data-pid="${SERVICES}"><i class="ph ph-plus"></i><span class="row-main"><span class="row-title">Add a service</span><span class="row-sub">MySQL, Apache, Redis...</span></span></button>`);
 
   $('[data-act=toggle-hidden]').classList.toggle('on', state.showHidden);
+  $('#project-filters').innerHTML = PROJECT_FILTERS.map((filter) => `<button class="btn sm${state.projectFilter === filter ? ' on' : ''}" data-act="project-filter" data-filter="${filter}" aria-pressed="${state.projectFilter === filter}">${({ all: 'All', running: 'Running', stopped: 'Stopped', error: 'Errors' })[filter]}</button>`).join('');
   const list = visibleProjects();
   morph($('#projects'), list.map((p) => {
     const metas = termsOf((m) => m.projectId === p.id);
     const n = metas.filter((m) => m.status === 'running').length;
     const st = statusOf(metas);
     const cls = ['row', state.selected === p.id && 'selected', p.hidden && 'is-hidden'].filter(Boolean).join(' ');
-    return `<button class="${cls}" data-act="select" data-pid="${esc(p.id)}">
+    const favorite = state.favorites.has(p.id);
+    return `<div class="project-row"><button class="${cls}" data-act="select" data-pid="${esc(p.id)}">
       <span class="avatar-wrap">${avatar(p)}${st ? `<span class="dot ${st} badge"></span>` : ''}</span>
       <span class="row-main"><span class="row-title">${esc(p.name)}</span><span class="row-sub git-line">${gitLine(p) || esc(projectSub(p))}</span></span>
       ${n ? `<span class="count">${n}</span>` : ''}
-    </button>`;
+    </button><button class="icon-btn sm favorite${favorite ? ' on' : ''}" data-act="favorite" data-pid="${esc(p.id)}" aria-pressed="${favorite}" aria-label="${favorite ? 'Unfavorite' : 'Favorite'} ${esc(p.name)}" title="${favorite ? 'Remove from favorites' : 'Pin to favorites'}"><i class="${favorite ? 'ph-fill' : 'ph'} ph-star"></i></button></div>`;
   }).join('') || `<p class="side-empty">${state.config.projects.length ? 'No matching projects.' : 'No projects yet.'}</p>`);
 }
 
@@ -90,6 +92,7 @@ function toolbarBody(project: Project | undefined, grid: boolean) {
     <button class="icon-btn host-only" data-act="open" data-with="explorer" data-path="${esc(p.path)}" title="Open in Explorer"><i class="ph ph-folder-open"></i></button>
     <button class="icon-btn host-only" data-act="open-wt" data-pid="${esc(p.id)}" title="Open starred scripts in Windows Terminal"><i class="ph ph-arrow-square-out"></i></button>
     <button class="icon-btn" data-act="hide" data-pid="${esc(p.id)}" title="${p.hidden ? 'Unhide project' : 'Hide project'}"><i class="ph ${p.hidden ? 'ph-eye' : 'ph-eye-slash'}"></i></button>
+    <button class="icon-btn" data-act="project-remove" data-pid="${esc(p.id)}" aria-label="Remove ${esc(p.name)} from Devdeck" title="Remove project from Devdeck (files on disk are kept)"><i class="ph ph-trash"></i></button>
     ${termsOf((m) => m.projectId === p.id).length > 1 ? viewToggle(grid) : ''}`;
 }
 

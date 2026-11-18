@@ -105,8 +105,9 @@ const findIcon = (dirs: string[]): string | null => {
 // node_modules missing, or a dependency from package.json not installed (e.g. after a pull added one).
 // Checks content, not timestamps: git checkouts and script edits touch mtimes without changing what's needed.
 export function installState(dir: string, pkg: PackageJson | null = readPkg(dir)): InstallState {
-  if (!fs.existsSync(path.join(dir, 'node_modules'))) return 'missing';
   const deps = Object.keys({ ...pkg?.dependencies, ...pkg?.devDependencies });
+  if (!deps.length) return 'ok'; // nothing to install, so no node_modules is fine
+  if (!fs.existsSync(path.join(dir, 'node_modules'))) return 'missing';
   return deps.every((d) => fs.existsSync(path.join(dir, 'node_modules', d, 'package.json'))) ? 'ok' : 'stale';
 }
 
@@ -143,8 +144,17 @@ export function scanProject(dir: string): Project {
   };
 }
 
-export function scanAll({ roots = [], manual = [] }: { roots?: string[]; manual?: string[] }): Project[] {
-  const dirs = [...roots.flatMap(subdirs), ...manual];
+/** Comparison key for a folder path (case-insensitive on Windows, no trailing slash). */
+export const pathKey = (p: string) => { const r = path.resolve(p); return process.platform === 'win32' ? r.toLowerCase() : r; };
+
+export function scanAll({ roots = [], manual = [], excluded = [] }: { roots?: string[]; manual?: string[]; excluded?: string[] }): Project[] {
+  const seen = new Set(excluded.map(pathKey));
+  const dirs = [...roots.flatMap(subdirs), ...manual].map((dir) => path.resolve(dir)).filter((dir) => {
+    const key = pathKey(dir);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   return dirs.map(scanProject).filter((p) => p.apps.length);
 }
 
@@ -156,7 +166,7 @@ export function merge(oldProjects: Project[] = [], fresh: Project[]): Project[] 
     if (!o) return p;
     const oldApps = new Map(o.apps.map((a) => [a.id, a]));
     return {
-      ...p, name: o.name, hidden: o.hidden, services: o.services, bootStart: o.bootStart,
+      ...p, name: o.name, hidden: o.hidden, services: o.services, bootStart: o.bootStart, skippedReqs: o.skippedReqs,
       apps: p.apps.map((a) => {
         const oa = oldApps.get(a.id);
         return oa && (oa.autostart === null || a.scripts.includes(oa.autostart)) ? { ...a, autostart: oa.autostart } : a;
@@ -165,7 +175,20 @@ export function merge(oldProjects: Project[] = [], fresh: Project[]): Project[] 
   });
 }
 
+// A service is only "up" when the program on its port is the one its command starts (IIS or Skype on :80 are not Apache).
+const LAUNCHERS = new Set(['cmd', 'powershell', 'pwsh', 'node', 'npm', 'npx', 'python', 'java', 'docker', 'wsl', 'wscript']);
+export function isForeign(cmd: string, owner: string | null | undefined): boolean {
+  const exe = cmd.match(/([\w.-]+)\.exe\b/i)?.[1].toLowerCase();
+  return !!(exe && owner && !LAUNCHERS.has(exe) && owner.toLowerCase() !== exe);
+}
+
 if (process.argv[1]?.endsWith('scan.ts') && process.argv.includes('--test')) {
+  const apache = String.raw`& 'C:\xampp\apache\bin\httpd.exe'`;
+  assert.equal(isForeign(apache, 'System'), true);
+  assert.equal(isForeign(apache, 'httpd'), false);
+  assert.equal(isForeign(apache, null), false);
+  assert.equal(isForeign('npm run dev', 'node'), false);
+  assert.equal(isForeign('cmd.exe /c redis', 'redis-server'), false);
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-scan-'));
   const write = (rel: string, content: string) => {
     fs.mkdirSync(path.dirname(path.join(root, rel)), { recursive: true });
@@ -239,6 +262,15 @@ if (process.argv[1]?.endsWith('scan.ts') && process.argv.includes('--test')) {
   assert.equal(m?.name, 'Magazin');
   assert.equal(m?.hidden, true);
   assert.equal(m?.apps.find((a) => a.name === 'frontend')?.autostart, 'build');
+
+  // excluded folders are skipped; a project without node_modules is still scanned
+  write('bare/package.json', JSON.stringify({ dependencies: { left: '1' } }));
+  const bare = find(scanAll({ roots: [root], excluded: [path.join(root, 'SHOP') + path.sep] }), 'bare');
+  assert.equal(bare.apps[0].install, 'missing');
+  write('nodeps/package.json', JSON.stringify({ scripts: { start: 'node .' } }));
+  assert.equal(installState(path.join(root, 'nodeps')), 'ok', 'no dependencies: nothing to install');
+  assert.ok(!scanAll({ roots: [root], excluded: [path.join(root, 'shop')] }).some((p) => p.name === 'shop'));
+  assert.deepEqual(merge([{ ...bare, skippedReqs: ['db'] }], [bare])[0].skippedReqs, ['db']);
 
   fs.rmSync(root, { recursive: true, force: true });
   console.log('scan.ts: all checks passed');

@@ -2,7 +2,7 @@
 import type { History, PublicConfig, ServerMsg } from '../../types.ts';
 import { $, dataOf, fmtDur, toast } from './util.ts';
 import { api, connect, send } from './net.ts';
-import { state, persist, SERVICES } from './state.ts';
+import { state, persist, SERVICES, PROJECT_FILTERS, toggleFavorite, serviceUrl, type ProjectFilter } from './state.ts';
 import { render, drawStats } from './render.ts';
 import { addTerm, removeTerm, focusTerm, queueFit, runScript, openShell } from './terminals.ts';
 import { chartHover, pushStats } from './charts.ts';
@@ -16,6 +16,7 @@ import {
 // ---------- live updates ----------
 function onMessage(msg: ServerMsg) {
   switch (msg.t) {
+    case 'error': toast(msg.message, true); return;
     case 'output': state.terms.get(msg.id)?.term.write(msg.data); return;
     case 'stats':
       Object.assign(state, { stats: msg.stats, machine: msg.machine });
@@ -61,7 +62,7 @@ const field = (f: HTMLFormElement, name: string) => f.elements.namedItem(name) a
 async function dbAction(label: string, url: string, body: unknown, done?: (r: any) => void) {
   state.dbBusy = label;
   render();
-  try { done?.(await api('POST', url, body)); } catch (err) { toast((err as Error).message, true); }
+  try { const result = await api('POST', url, body); done?.(result); } catch (err) { toast((err as Error).message, true); }
   state.dbBusy = '';
   await loadDb(true);
   render();
@@ -71,6 +72,11 @@ const actions: Record<string, Handler> = {
   home: () => { state.selected = null; persist(); render(); },
   nav: () => document.body.classList.toggle('nav-open'),
   select: (_, { pid }) => { state.selected = pid!; persist(); render(); },
+  favorite: (_, { pid }) => { toggleFavorite(pid!); render(); },
+  'project-filter': (b) => {
+    const filter = b.dataset.filter as ProjectFilter;
+    if (PROJECT_FILTERS.includes(filter)) { state.projectFilter = filter; persist(); render(); }
+  },
   page: (b, { pid }) => go(pid!, b.dataset.page!),
   'env-tab': (_, { pid }) => go(pid!, 'env'),
   focus: (_, { tid }) => { const t = state.terms.get(tid!); if (t) focusTerm(t.meta); },
@@ -105,6 +111,31 @@ const actions: Record<string, Handler> = {
   'close-dialog': () => $<HTMLDialogElement>('#import-dialog').close(),
   // requirements
   'req-refresh': () => loadRequirements(state.selected!, true),
+  'req-skip': async (b, { pid }) => {
+    const skip = b.dataset.skip === '1';
+    await api('POST', '/api/requirements/skip', { projectId: pid, reqId: b.dataset.req, skip });
+    state.config = await api('GET', '/api/config');
+    await loadRequirements(pid!, true);
+    toast(skip ? 'Check skipped. Restore it any time from the Requirements list.' : 'Check restored.');
+  },
+  'project-remove': async (b, { pid }) => {
+    const p = state.config.projects.find((x) => x.id === pid);
+    if (!p) return;
+    if (!confirm(`Remove "${p.name}" from Devdeck?\n\nNo files are deleted from disk. Its running terminals are stopped.\nYou can bring it back from Settings > Projects.`)) return;
+    await api('POST', '/api/projects/remove', { id: pid });
+    state.config = await api('GET', '/api/config');
+    if (state.selected === pid) { state.selected = null; persist(); }
+    render();
+    if (b.closest('#settings')) drawSettings();
+    toast(`"${p.name}" removed from the list. Files on disk are untouched; restore it in Settings.`);
+  },
+  'project-restore': async (b) => {
+    await api('POST', '/api/projects/restore', { path: b.dataset.path });
+    state.config = await api('GET', '/api/config');
+    render();
+    drawSettings();
+    toast('Project restored.');
+  },
   'req-fix': async (b) => {
     const pid = state.selected!;
     const { kind, arg } = b.dataset;
@@ -116,6 +147,22 @@ const actions: Record<string, Handler> = {
   // services
   'start-service': (_, { sid }) => send({ t: 'startService', serviceId: sid! }),
   'stop-service': (_, { sid }) => send({ t: 'stopService', serviceId: sid! }),
+  'restart-service': (_, { sid }) => send({ t: 'restartService', serviceId: sid! }),
+  'service-autostart': async (_, { sid }) => {
+    const svc = state.config.services.find((s) => s.id === sid);
+    if (!svc) return;
+    state.config = await api('POST', '/api/services', { ...svc, autostart: !svc.autostart });
+    render();
+  },
+  'copy-service': async (_, { sid }) => {
+    const svc = state.config.services.find((s) => s.id === sid);
+    if (!svc) return;
+    const endpoint = serviceUrl(svc, location.href) || (svc.port ? `${location.hostname}:${svc.port}` : '');
+    if (!endpoint) return;
+    if (!navigator.clipboard) { prompt('Service address (Ctrl+C to copy)', endpoint); return; }
+    await navigator.clipboard.writeText(endpoint);
+    toast('Service address copied.');
+  },
   'edit-service': (_, { sid }) => openServiceDialog(state.config.services.find((x) => x.id === sid)),
   'remove-service': async (_, { sid }) => {
     const svc = state.config.services.find((x) => x.id === sid);
@@ -190,6 +237,7 @@ const actions: Record<string, Handler> = {
   },
   'close-settings': () => $<HTMLDialogElement>('#settings').close(),
   logout: async () => { await api('POST', '/api/logout'); location.href = '/login.html'; },
+  'resume-toggle': async () => { state.config = await api('POST', '/api/resume', { enabled: !state.config.resumeRunning }); render(); drawSettings(); },
   'autostart-toggle': async () => { await api('POST', '/api/autostart', { enabled: !state.me.autostart }); await loadSettings(); },
   shortcut: async () => toast(`Shortcut created: ${(await api('POST', '/api/shortcut')).path}`),
   'user-create': async () => {
@@ -250,6 +298,11 @@ document.addEventListener('click', async (e) => {
 // Checkboxes: project settings ("start with Devdeck", "needs MySQL") and git file selection.
 document.addEventListener('change', async (e) => {
   const el = e.target as HTMLInputElement;
+  if (el.dataset.projAuto !== undefined) {
+    const script = (el as unknown as HTMLSelectElement).value || null;
+    await saveConfig({ projects: state.config.projects.map((p) => p.id !== state.selected ? p : { ...p, apps: p.apps.map((a) => a.id === el.dataset.projAuto ? { ...a, autostart: script } : a) }) });
+    return;
+  }
   if (el.dataset.projSetting || el.dataset.projService) {
     const p = state.config.projects.find((x) => x.id === state.selected);
     if (!p) return;
