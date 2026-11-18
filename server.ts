@@ -23,7 +23,7 @@ import {
 import type { ClientMsg, GitSummary, Project } from './types.ts';
 
 // What was running, kept on disk so a restart can bring it back. Snapshot before killAll marks everything as stopped.
-let resumeStarted = false; // don't wipe the saved list before the boot-time resume had a chance to run
+let resumeStarted = process.env.DEVDECK_AUTOSTART === '0'; // don't wipe the saved list before the boot-time resume had a chance to run
 function snapshotRunning() {
   if (!config.resumeRunning || !resumeStarted) return;
   const now = runningScripts();
